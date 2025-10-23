@@ -224,6 +224,14 @@ typedef struct Program {
     Function *functions;
 } Program;
 
+/* forward declarations for compile-time function call support */
+static Program *g_program;
+static Function *find_function(const char *name);
+static long long call_function_compiletime(Function *fn, long long *args, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
+static char *trim(char *s);
+
+
+
 /* Symbol table for simple compile-time evaluation */
 typedef enum { SYM_INT, SYM_STR } SymType;
 typedef struct Sym {
@@ -374,6 +382,31 @@ static char *eval_placeholder(const char *inside) {
     char buf[64]; snprintf(buf, sizeof(buf), "%lld", v); return my_strdup(buf);
 }
 
+/* Unescape peric template sequences: \n -> newline, \t -> 4 spaces, \\\ -> backslash
+   Return a newly malloc()'d string. */
+static char *unescape_peric(const char *s) {
+    if (!s) return NULL;
+    int len = strlen(s);
+    int max = len * 4 + 1; /* tabs may expand */
+    char *out = malloc(max);
+    if (!out) return NULL;
+    int oi = 0;
+    for (int i = 0; i < len; ++i) {
+        if (s[i] == '\\' && i + 1 < len) {
+            char c = s[i+1];
+            if (c == 'n') { out[oi++] = '\n'; i++; }
+            else if (c == 't') { /* tab -> 4 spaces */ out[oi++] = ' '; out[oi++] = ' '; out[oi++] = ' '; out[oi++] = ' '; i++; }
+            else if (c == '\\') { out[oi++] = '\\'; i++; }
+            else { /* unknown escape: keep next char as-is */ out[oi++] = c; i++; }
+        } else {
+            out[oi++] = s[i];
+        }
+        if (oi >= max - 1) break;
+    }
+    out[oi] = '\0';
+    return out;
+}
+
 /* Execute function statements at compile-time to populate msgs and return code */
 static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p, int *retcode_p);
 
@@ -381,6 +414,8 @@ static int execute_function_compiletime(Function *f, char ***out_msgs, unsigned 
     sym_clear();
     int max_msgs = 8; char **msgs = malloc(sizeof(char*) * max_msgs); unsigned int *msg_lens = malloc(sizeof(unsigned int) * max_msgs); int n_msgs = 0; int retcode = 0;
 
+    // set global program pointer for function lookup
+    // (we expect caller to set g_program before calling execute_function_compiletime)
     // execute top-level body
     exec_stmt_list(f->body, &msgs, &msg_lens, &n_msgs, &max_msgs, &retcode);
 
@@ -394,7 +429,37 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
         if (s->kind == ST_ERIC_DECL) {
             const char *p = s->raw + 5; while (*p == ' ') p++; const char *eq = strchr(p, '=');
             if (eq) {
-                const char *name_end = eq; while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; char name[128]; if (namelen>=127) namelen=127; memcpy(name, p, namelen); name[namelen]='\0'; const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++; if (rhs[0] == '"') { const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val); } else { long long v = eval_int_expr(rhs); sym_set_int(name, v); }
+                /* extract LHS name */
+                const char *name_start = p; while (*name_start == ' ' || *name_start=='\t') name_start++; const char *name_end = eq; while (name_end > name_start && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - name_start; char name[256]; if (namelen >= (int)sizeof(name)) namelen = sizeof(name)-1; memcpy(name, name_start, namelen); name[namelen] = '\0';
+                const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
+                if (rhs[0] == '"') {
+                    const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
+                } else {
+                    /* detect function call like fname(arg1, arg2) */
+                    const char *op = strchr(rhs, '(');
+                    if (op) {
+                        int fname_len = op - rhs;
+                        char fname[128]; if (fname_len >= (int)sizeof(fname)) fname_len = sizeof(fname)-1; memcpy(fname, rhs, fname_len); fname[fname_len]='\0'; char *ftrim = trim(fname);
+                        const char *cl = strchr(op, ')'); if (cl) {
+                            char argsbuf[256]; int alen = cl - op - 1; if (alen >= (int)sizeof(argsbuf)) alen = sizeof(argsbuf)-1; memcpy(argsbuf, op+1, alen); argsbuf[alen]='\0';
+                            long long argvals[8]; int argcnt = 0; char *cpy = my_strdup(argsbuf); char *tok = strtok(cpy, ","); while (tok && argcnt < 8) { char *t = trim(tok); argvals[argcnt++] = eval_int_expr(t); tok = strtok(NULL, ","); } free(cpy);
+                            Function *fn = find_function(ftrim);
+                            if (fn) {
+                                long long cres = call_function_compiletime(fn, argvals, argcnt, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
+                                sym_set_int(name, cres);
+                            } else {
+                                long long v = eval_int_expr(rhs);
+                                sym_set_int(name, v);
+                            }
+                        } else {
+                            long long v = eval_int_expr(rhs);
+                            sym_set_int(name, v);
+                        }
+                    } else {
+                        long long v = eval_int_expr(rhs);
+                        sym_set_int(name, v);
+                    }
+                }
             } else {
                     const char *arrow = strstr(p, "->"); const char *name_end = arrow ? arrow : p + strlen(p); while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; char name[128]; if (namelen>=127) namelen=127; memcpy(name,p,namelen); name[namelen]='\0';
                     // handle array type like int[5]
@@ -425,28 +490,61 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 if (rhs[0] == '"') {
                     const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
                 } else {
-                    long long v = eval_int_expr(rhs);
-                    sym_set_int(name, v);
+                    /* detect function call like fname(arg1, arg2) */
+                    const char *op = strchr(rhs, '(');
+                    if (op) {
+                        int fname_len = op - rhs;
+                        char fname[128]; if (fname_len >= (int)sizeof(fname)) fname_len = sizeof(fname)-1; memcpy(fname, rhs, fname_len); fname[fname_len]='\0'; char *ftrim = trim(fname);
+                        const char *cl = strchr(op, ')'); if (cl) {
+                            char argsbuf[256]; int alen = cl - op - 1; if (alen >= (int)sizeof(argsbuf)) alen = sizeof(argsbuf)-1; memcpy(argsbuf, op+1, alen); argsbuf[alen]='\0';
+                            // parse comma-separated integer args
+                            long long argvals[8]; int argcnt = 0; char *cpy = my_strdup(argsbuf); char *tok = strtok(cpy, ","); while (tok && argcnt < 8) { char *t = trim(tok); argvals[argcnt++] = eval_int_expr(t); tok = strtok(NULL, ","); } free(cpy);
+                            Function *fn = find_function(ftrim);
+                            if (fn) {
+                                long long cres = call_function_compiletime(fn, argvals, argcnt, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
+                                sym_set_int(name, cres);
+                            } else {
+                                long long v = eval_int_expr(rhs);
+                                sym_set_int(name, v);
+                            }
+                        } else {
+                            long long v = eval_int_expr(rhs);
+                            sym_set_int(name, v);
+                        }
+                    } else {
+                        long long v = eval_int_expr(rhs);
+                        sym_set_int(name, v);
+                    }
                 }
             }
         } else if (s->kind == ST_PERIC) {
             const char *p = strstr(s->raw, "peric("); if (!p) { s = s->next; continue; } const char *q = strchr(p, '"'); if (!q) { s = s->next; continue; } q++; const char *r = strchr(q, '"'); if (!r) { s = s->next; continue; } size_t len = r - q; char *tmpl = malloc(len+1); memcpy(tmpl, q, len); tmpl[len] = '\0'; char out[1024]; out[0] = '\0'; const char *cur = tmpl; while (*cur) { const char *obr = strchr(cur, '{'); if (!obr) { strncat(out, cur, sizeof(out)-strlen(out)-1); break; } strncat(out, cur, obr - cur); const char *cbr = strchr(obr, '}'); if (!cbr) { strncat(out, obr, sizeof(out)-strlen(out)-1); break; } int ilen = cbr - (obr+1); char inner[256]; if (ilen >= (int)sizeof(inner)) ilen = sizeof(inner)-1; memcpy(inner, obr+1, ilen); inner[ilen]='\0'; char *evaled = eval_placeholder(inner); strncat(out, evaled, sizeof(out)-strlen(out)-1); free(evaled); cur = cbr + 1; }
-            /* ensure newline terminated messages for better console output */
-            size_t olen = strlen(out);
-            /* DEBUG: show the resolved peric string before storing */
-            printf("DEBUG: peric resolved='%s'\n", out);
-            char *withn = malloc(olen + 2);
-            memcpy(withn, out, olen);
-            withn[olen] = '\n';
-            withn[olen + 1] = '\0';
+                /* ensure escape sequences like \n and \t are interpreted */
+                char *un = unescape_peric(out);
+                if (!un) un = my_strdup("");
+                size_t olen = strlen(un);
+                /* DEBUG: show the resolved peric string before storing */
+                printf("DEBUG: peric resolved='%s'\n", un);
+                char *withn = malloc(olen + 2);
+                memcpy(withn, un, olen);
+                withn[olen] = '\n';
+                withn[olen + 1] = '\0';
+                free(un);
             if (*n_msgs_p >= *max_msgs_p) { *max_msgs_p *= 2; *msgs_p = realloc(*msgs_p, sizeof(char*)*(*max_msgs_p)); *msg_lens_p = realloc(*msg_lens_p, sizeof(unsigned int)*(*max_msgs_p)); }
             (*msgs_p)[*n_msgs_p] = withn;
             (*msg_lens_p)[*n_msgs_p] = (unsigned int)strlen(withn);
             (*n_msgs_p)++;
             free(tmpl);
-        } else if (s->kind == ST_RETURN) { const char *p = s->raw + strlen("deschodt"); while (*p==' '||*p=='\t') p++; if (*p) { *retcode_p = atoi(p); }
+        } else if (s->kind == ST_RETURN) {
+            const char *p = s->raw + strlen("deschodt"); while (*p==' '||*p=='\t') p++;
+            if (*p) {
+                /* evaluate the return expression (may be an expression or identifiers) */
+                long long rv = eval_int_expr(p);
+                *retcode_p = (int)rv;
+            }
             printf("DEBUG: ST_RETURN encountered raw='%s' ret=%d\n", s->raw, *retcode_p);
-            return 1; }
+            return 1;
+        }
         else if (s->kind == ST_CONTINUE) { /* continue */ return 2; }
         else if (s->kind == ST_BREAK) { /* break */ return 3; }
         else if (s->kind == ST_FOR) {
@@ -844,6 +942,7 @@ int main(int argc, char **argv) {
     Program *prog = parse_program(filtered);
     // debug: print parsed AST
     print_program(prog);
+    g_program = prog;
     Function *f = prog->functions;
     Function *mainf = NULL;
     while (f) { if (strcmp(f->name, "Eric") == 0) { mainf = f; break; } f = f->next; }
@@ -863,4 +962,50 @@ int main(int argc, char **argv) {
     free(filtered);
     free(copy2);
     return r;
+}
+
+/* Implementations for function lookup and compile-time calls (placed after sym helpers) */
+static Function *find_function(const char *name) {
+    if (!g_program) return NULL;
+    Function *f = g_program->functions;
+    while (f) {
+        if (strcmp(f->name, name) == 0) return f;
+        f = f->next;
+    }
+    return NULL;
+}
+
+static long long call_function_compiletime(Function *fn, long long *args, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p) {
+    if (!fn) return 0;
+    Sym *saved = sym_table;
+    sym_table = NULL;
+    if (fn->params) {
+        const char *p = fn->params;
+        char *cpy = my_strdup(p);
+        char *tok = strtok(cpy, ",");
+        int idx = 0;
+        while (tok && idx < nargs) {
+            char *t = trim(tok);
+            char *arr = strstr(t, "->");
+            char namebuf[128];
+            if (arr) { int ln = arr - t; if (ln >= (int)sizeof(namebuf)) ln = sizeof(namebuf)-1; memcpy(namebuf, t, ln); namebuf[ln] = '\0'; }
+            else { strncpy(namebuf, t, sizeof(namebuf)-1); namebuf[sizeof(namebuf)-1] = '\0'; }
+            char *ntrim = trim(namebuf);
+            sym_set_int(ntrim, args[idx]);
+            idx++; tok = strtok(NULL, ",");
+        }
+        free(cpy);
+    }
+    int local_max = 4; char **local_msgs = malloc(sizeof(char*) * local_max); unsigned int *local_lens = malloc(sizeof(unsigned int) * local_max); int local_n = 0; int retcode = 0;
+    exec_stmt_list(fn->body, &local_msgs, &local_lens, &local_n, &local_max, &retcode);
+    // append local messages to caller's message buffers
+    for (int i = 0; i < local_n; ++i) {
+        if (*n_msgs_p >= *max_msgs_p) { *max_msgs_p *= 2; *msgs_p = realloc(*msgs_p, sizeof(char*)*(*max_msgs_p)); *msg_lens_p = realloc(*msg_lens_p, sizeof(unsigned int)*(*max_msgs_p)); }
+        (*msgs_p)[*n_msgs_p] = local_msgs[i]; (*msg_lens_p)[*n_msgs_p] = local_lens[i]; (*n_msgs_p)++;
+    }
+    free(local_lens);
+    free(local_msgs);
+    sym_clear();
+    sym_table = saved;
+    return retcode;
 }
