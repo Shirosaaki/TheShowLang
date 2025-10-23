@@ -11,13 +11,13 @@ Deschodt Eric() -> int
 
     deschodt 0
 
-=> print Boucle aer :
-=> print i = 0
-=> print i = 1
-=> print i = 2
-=> print i = 3
-=> print i = 4
-=> print Boucle darius :
-=> print x = 0
-=> print x = 1
-=> print x = 2
+desnote print Boucle aer :
+desnote print i = 0
+desnote print i = 1
+desnote print i = 2
+desnote print i = 3
+desnote print i = 4
+desnote print Boucle darius :
+desnote print x = 0
+desnote print x = 1
+desnote print x = 2

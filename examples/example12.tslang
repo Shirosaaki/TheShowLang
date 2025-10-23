@@ -9,4 +9,4 @@ Deschodt Eric() -> int
     peric("factoriel({val}) = {factoriel(val)}")
     deschodt 0
 
-=> print factoriel(5) = 120
+desnote print factoriel(5) = 120

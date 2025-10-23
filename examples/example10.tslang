@@ -10,4 +10,4 @@ Deschodt Eric() -> int
     peric("PI = {PI}, Jour = {j}")
     deschodt 0
 
-=> print PI = 3.1415, Jour = 1
+desnote print PI = 3.1415, Jour = 1
