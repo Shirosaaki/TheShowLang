@@ -411,7 +411,6 @@ static char *unescape_peric(const char *s) {
 static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p, int *retcode_p);
 
 static int execute_function_compiletime(Function *f, char ***out_msgs, unsigned int **out_lens, int *out_n_msgs, int *out_ret) {
-    sym_clear();
     int max_msgs = 8; char **msgs = malloc(sizeof(char*) * max_msgs); unsigned int *msg_lens = malloc(sizeof(unsigned int) * max_msgs); int n_msgs = 0; int retcode = 0;
 
     // set global program pointer for function lookup
@@ -874,6 +873,56 @@ static void free_program(Program *p) {
     free(p);
 }
 
+/* Scan the filtered source for top-level desconst and desenum declarations
+   and populate the compile-time symbol table accordingly. */
+static void process_top_level_decls(const char *filtered) {
+    char *copy = my_strdup(filtered);
+    char *line = strtok(copy, "\n");
+    while (line) {
+        char *t = trim(line);
+        if (strncmp(t, "desconst ", 9) == 0) {
+            const char *p = t + 9;
+            const char *eq = strchr(p, '=');
+            if (eq) {
+                const char *name_start = p; while (*name_start==' '||*name_start=='\t') name_start++;
+                const char *name_end = eq; while (name_end > name_start && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--;
+                int nlen = name_end - name_start; char name[128]; if (nlen >= (int)sizeof(name)) nlen = sizeof(name)-1; memcpy(name, name_start, nlen); name[nlen] = '\0';
+                const char *rhs = eq + 1; while (*rhs==' '||*rhs=='\t') rhs++;
+                // if quoted string
+                if (rhs[0] == '"') {
+                    const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; int vlen = q - (rhs+1); char val[256]; if (vlen >= (int)sizeof(val)) vlen = sizeof(val)-1; memcpy(val, rhs+1, vlen); val[vlen] = '\0';
+                    sym_set_str(name, val);
+                } else {
+                    // decide int vs string (float contains '.')
+                    int is_float = 0; for (const char *c = rhs; *c; ++c) if (*c == '.') { is_float = 1; break; }
+                    if (is_float) {
+                        // keep textual representation
+                        char val[256]; int vlen = 0; while (rhs[vlen] && rhs[vlen] != ' ' && rhs[vlen] != '\t' && rhs[vlen] != '\n') vlen++; if (vlen >= (int)sizeof(val)) vlen = sizeof(val)-1; memcpy(val, rhs, vlen); val[vlen] = '\0';
+                        sym_set_str(name, val);
+                    } else {
+                        long long v = eval_int_expr(rhs);
+                        sym_set_int(name, v);
+                    }
+                }
+            }
+        } else if (strncmp(t, "desenum ", 8) == 0) {
+            // collect following indented names as enum members
+            char *peek = strtok(NULL, "\n"); int idx = 0;
+            while (peek) {
+                char *rawpeek = peek; int pindent = 0; while (rawpeek[pindent]==' '||rawpeek[pindent]=='\t') pindent++; char *tpeek = trim(peek);
+                if (tpeek[0] == '\0') { peek = strtok(NULL, "\n"); continue; }
+                if (pindent == 0) { break; }
+                // tpeek is a member name
+                sym_set_int(tpeek, idx++);
+                peek = strtok(NULL, "\n");
+            }
+            // continue parse from peek
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(copy);
+}
+
 static void print_program(Program *p) {
     if (!p) return;
     Function *f = p->functions;
@@ -938,7 +987,8 @@ int main(int argc, char **argv) {
         ln = strtok(NULL, "\n");
     }
 
-    // Parse program and execute the main function at compile-time to collect messages
+    // Process top-level consts/enums, then parse program and execute the main function at compile-time to collect messages
+    process_top_level_decls(filtered);
     Program *prog = parse_program(filtered);
     // debug: print parsed AST
     print_program(prog);
