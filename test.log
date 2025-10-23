@@ -1,0 +1,410 @@
+===== Running example1.tslang =====
+Function Eric() -> int
+  [PERIC] peric("Salut, monde !")
+  [RETURN] deschodt 0
+DEBUG: peric resolved='Salut, monde !'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+Salut, monde !
+exit0
+
+===== Running example2.tslang =====
+Function Eric() -> int
+  [ERIC] eric x -> int
+  [ERIC] eric y = 10
+  [ASSIGN] x = 5
+  [ERIC] eric z = x + y
+  [PERIC] peric("x = {x}, y = {y}, z = {z}")
+  [RETURN] deschodt 0
+DEBUG: parse_factor lookup 'x' -> 5
+DEBUG: parse_factor lookup 'y' -> 10
+DEBUG: peric resolved='x = 5, y = 10, z = 15'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+x = 5, y = 10, z = 15
+exit0
+
+===== Running example3.tslang =====
+Function Eric() -> int
+  [PERIC] peric("Boucle aer :")
+  [FOR] aer i in range(0, 5):
+    (body) peric("i = {i}")
+  [PERIC] peric("Boucle darius :")
+  [ERIC] eric x = 0
+  [WHILE] darius (x < 3):
+    (body) peric("x = {x}")
+    (body) x = x + 1
+  [RETURN] deschodt 0
+DEBUG: peric resolved='Boucle aer :'
+DEBUG: peric resolved='i = 0'
+DEBUG: peric resolved='i = 1'
+DEBUG: peric resolved='i = 2'
+DEBUG: peric resolved='i = 3'
+DEBUG: peric resolved='i = 4'
+DEBUG: peric resolved='Boucle darius :'
+DEBUG: parse_factor lookup 'x' -> 0
+DEBUG: peric resolved='x = 0'
+DEBUG: parse_factor lookup 'x' -> 0
+DEBUG: parse_factor lookup 'x' -> 1
+DEBUG: peric resolved='x = 1'
+DEBUG: parse_factor lookup 'x' -> 1
+DEBUG: parse_factor lookup 'x' -> 2
+DEBUG: peric resolved='x = 2'
+DEBUG: parse_factor lookup 'x' -> 2
+DEBUG: parse_factor lookup 'x' -> 3
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+Boucle aer :
+i = 0
+i = 1
+i = 2
+i = 3
+i = 4
+Boucle darius :
+x = 0
+x = 1
+x = 2
+exit0
+
+===== Running example4.tslang =====
+processing deschelse
+appending to else_body: peric("Mineur")
+Function Eric() -> int
+  [ERIC] eric age = 20
+  [IF] erif (age >= 18):
+    (if-body) peric("Majeur")
+    (else-body) peric("Mineur")
+  [RETURN] deschodt 0
+DEBUG: IF cond='age >= 18'
+DEBUG: symbol age = 20 (int)
+DEBUG: parse_factor lookup 'age' -> 20
+DEBUG: cond 'age >= 18' => 1
+DEBUG: peric resolved='Majeur'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+Majeur
+exit0
+
+===== Running example5.tslang =====
+Function Eric() -> int
+  [ERIC] eric p -> Personne
+  [ASSIGN] p.nom = "Alice"
+  [ASSIGN] p.age = 25
+  [PERIC] peric("Nom: {p.nom}, Age: {p.age}")
+  [RETURN] deschodt 0
+DEBUG: peric resolved='Nom: Alice, Age: 25'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+Nom: Alice, Age: 25
+exit0
+
+===== Running example6.tslang =====
+Function Eric() -> int
+  [ERIC] eric nums -> int[5]
+  [ASSIGN] nums[0] = 1
+  [ASSIGN] nums[1] = 2
+  [ASSIGN] nums[2] = 3
+  [ASSIGN] nums[3] = 4
+  [ASSIGN] nums[4] = 5
+  [FOR] aer i in range(0, 5):
+    (body) peric("nums[{i}] = {nums[i]}")
+  [RETURN] deschodt 0
+DEBUG: parse_factor lookup 'i' -> 0
+DEBUG: parse_factor lookup 'nums[0]' -> 1
+DEBUG: peric resolved='nums[0] = 1'
+DEBUG: parse_factor lookup 'i' -> 1
+DEBUG: parse_factor lookup 'nums[1]' -> 2
+DEBUG: peric resolved='nums[1] = 2'
+DEBUG: parse_factor lookup 'i' -> 2
+DEBUG: parse_factor lookup 'nums[2]' -> 3
+DEBUG: peric resolved='nums[2] = 3'
+DEBUG: parse_factor lookup 'i' -> 3
+DEBUG: parse_factor lookup 'nums[3]' -> 4
+DEBUG: peric resolved='nums[3] = 4'
+DEBUG: parse_factor lookup 'i' -> 4
+DEBUG: parse_factor lookup 'nums[4]' -> 5
+DEBUG: peric resolved='nums[4] = 5'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+nums[0] = 1
+nums[1] = 2
+nums[2] = 3
+nums[3] = 4
+nums[4] = 5
+exit0
+
+===== Running example7.tslang =====
+Function Eric() -> int
+  [ERIC] eric nom = "Mathéo"
+  [ERIC] eric age = 21
+  [PERIC] peric("Bonjour {nom}, tu as {age} ans.")
+  [RETURN] deschodt 0
+DEBUG: peric resolved='Bonjour Mathéo, tu as 21 ans.'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+Bonjour Mathéo, tu as 21 ans.
+exit0
+
+===== Running example8.tslang =====
+Function Eric() -> int
+  [FOR] aer i in range(0, 10):
+    (body) erif (i == 3):
+    (body) erif (i == 7):
+    (body) peric("i = {i}")
+  [PERIC] peric("Fin de boucle")
+  [RETURN] deschodt 0
+DEBUG: IF cond='i == 3'
+DEBUG: symbol i = 0 (int)
+DEBUG: parse_factor lookup 'i' -> 0
+DEBUG: cond 'i == 3' => 0
+DEBUG: IF cond='i == 7'
+DEBUG: symbol i = 0 (int)
+DEBUG: parse_factor lookup 'i' -> 0
+DEBUG: cond 'i == 7' => 0
+DEBUG: peric resolved='i = 0'
+DEBUG: IF cond='i == 3'
+DEBUG: symbol i = 1 (int)
+DEBUG: parse_factor lookup 'i' -> 1
+DEBUG: cond 'i == 3' => 0
+DEBUG: IF cond='i == 7'
+DEBUG: symbol i = 1 (int)
+DEBUG: parse_factor lookup 'i' -> 1
+DEBUG: cond 'i == 7' => 0
+DEBUG: peric resolved='i = 1'
+DEBUG: IF cond='i == 3'
+DEBUG: symbol i = 2 (int)
+DEBUG: parse_factor lookup 'i' -> 2
+DEBUG: cond 'i == 3' => 0
+DEBUG: IF cond='i == 7'
+DEBUG: symbol i = 2 (int)
+DEBUG: parse_factor lookup 'i' -> 2
+DEBUG: cond 'i == 7' => 0
+DEBUG: peric resolved='i = 2'
+DEBUG: IF cond='i == 3'
+DEBUG: symbol i = 3 (int)
+DEBUG: parse_factor lookup 'i' -> 3
+DEBUG: cond 'i == 3' => 1
+DEBUG: IF cond='i == 3'
+DEBUG: symbol i = 4 (int)
+DEBUG: parse_factor lookup 'i' -> 4
+DEBUG: cond 'i == 3' => 0
+DEBUG: IF cond='i == 7'
+DEBUG: symbol i = 4 (int)
+DEBUG: parse_factor lookup 'i' -> 4
+DEBUG: cond 'i == 7' => 0
+DEBUG: peric resolved='i = 4'
+DEBUG: IF cond='i == 3'
+DEBUG: symbol i = 5 (int)
+DEBUG: parse_factor lookup 'i' -> 5
+DEBUG: cond 'i == 3' => 0
+DEBUG: IF cond='i == 7'
+DEBUG: symbol i = 5 (int)
+DEBUG: parse_factor lookup 'i' -> 5
+DEBUG: cond 'i == 7' => 0
+DEBUG: peric resolved='i = 5'
+DEBUG: IF cond='i == 3'
+DEBUG: symbol i = 6 (int)
+DEBUG: parse_factor lookup 'i' -> 6
+DEBUG: cond 'i == 3' => 0
+DEBUG: IF cond='i == 7'
+DEBUG: symbol i = 6 (int)
+DEBUG: parse_factor lookup 'i' -> 6
+DEBUG: cond 'i == 7' => 0
+DEBUG: peric resolved='i = 6'
+DEBUG: IF cond='i == 3'
+DEBUG: symbol i = 7 (int)
+DEBUG: parse_factor lookup 'i' -> 7
+DEBUG: cond 'i == 3' => 0
+DEBUG: IF cond='i == 7'
+DEBUG: symbol i = 7 (int)
+DEBUG: parse_factor lookup 'i' -> 7
+DEBUG: cond 'i == 7' => 1
+DEBUG: peric resolved='Fin de boucle'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+i = 0
+i = 1
+i = 2
+i = 4
+i = 5
+i = 6
+Fin de boucle
+exit0
+
+===== Running example9.tslang =====
+Function addition(a -> int, b -> int) -> int
+  [RETURN] deschodt a + b
+Function Eric() -> int
+  [ERIC] eric result = addition(5, 7)
+  [PERIC] peric("Résultat : {result}")
+  [RETURN] deschodt 0
+DEBUG: parse_factor lookup 'a' -> 5
+DEBUG: parse_factor lookup 'b' -> 7
+DEBUG: ST_RETURN encountered raw='deschodt a + b' ret=12
+DEBUG: caller_table symbols after call:
+DEBUG: peric resolved='Résultat : 12'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+Résultat : 12
+exit0
+
+===== Running example10.tslang =====
+Function Eric() -> int
+  [ERIC] eric j = Mardi
+  [PERIC] peric("PI = {PI}, Jour = {j}")
+  [RETURN] deschodt 0
+DEBUG: parse_factor lookup 'Mardi' -> 1
+DEBUG: peric resolved='PI = 3.1415, Jour = 1'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+PI = 3.1415, Jour = 1
+exit0
+
+===== Running example11.tslang =====
+Function incremente(ptr -> int*) -> void
+  [ASSIGN] *ptr = *ptr + 1
+Function Eric() -> int
+  [ERIC] eric n = 10
+  [OTHER] incremente(&n)
+  [PERIC] peric("n = {n}")
+  [RETURN] deschodt 0
+DEBUG: caller_table symbols after call:
+  n -> INT 11 (addr=0x5a6e25d74ab0)
+DEBUG: peric resolved='n = 11'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+n = 11
+exit0
+
+===== Running example12.tslang =====
+processing deschelse
+Function factoriel(n -> int) -> int
+  [IF] erif (n <= 1):
+    (if-body) deschodt 1
+    (else-body) deschodt n * factoriel(n - 1)
+Function Eric() -> int
+  [ERIC] eric val = 5
+  [PERIC] peric("factoriel({val}) = {factoriel(val)}")
+  [RETURN] deschodt 0
+DEBUG: parse_factor lookup 'val' -> 5
+DEBUG: IF cond='n <= 1'
+DEBUG: symbol n = 5 (int)
+DEBUG: parse_factor lookup 'n' -> 5
+DEBUG: cond 'n <= 1' => 0
+DEBUG: parse_factor lookup 'n' -> 5
+DEBUG: parse_factor lookup 'n' -> 5
+DEBUG: IF cond='n <= 1'
+DEBUG: symbol n = 4 (int)
+DEBUG: parse_factor lookup 'n' -> 4
+DEBUG: cond 'n <= 1' => 0
+DEBUG: parse_factor lookup 'n' -> 4
+DEBUG: parse_factor lookup 'n' -> 4
+DEBUG: IF cond='n <= 1'
+DEBUG: symbol n = 3 (int)
+DEBUG: parse_factor lookup 'n' -> 3
+DEBUG: cond 'n <= 1' => 0
+DEBUG: parse_factor lookup 'n' -> 3
+DEBUG: parse_factor lookup 'n' -> 3
+DEBUG: IF cond='n <= 1'
+DEBUG: symbol n = 2 (int)
+DEBUG: parse_factor lookup 'n' -> 2
+DEBUG: cond 'n <= 1' => 0
+DEBUG: parse_factor lookup 'n' -> 2
+DEBUG: parse_factor lookup 'n' -> 2
+DEBUG: IF cond='n <= 1'
+DEBUG: symbol n = 1 (int)
+DEBUG: parse_factor lookup 'n' -> 1
+DEBUG: cond 'n <= 1' => 1
+DEBUG: ST_RETURN encountered raw='deschodt 1' ret=1
+DEBUG: caller_table symbols after call:
+  n -> INT 2 (addr=0x587e502acf30)
+DEBUG: ST_RETURN encountered raw='deschodt n * factoriel(n - 1)' ret=2
+DEBUG: caller_table symbols after call:
+  n -> INT 3 (addr=0x587e502ace80)
+DEBUG: ST_RETURN encountered raw='deschodt n * factoriel(n - 1)' ret=6
+DEBUG: caller_table symbols after call:
+  n -> INT 4 (addr=0x587e502acdd0)
+DEBUG: ST_RETURN encountered raw='deschodt n * factoriel(n - 1)' ret=24
+DEBUG: caller_table symbols after call:
+  n -> INT 5 (addr=0x587e502acd20)
+DEBUG: ST_RETURN encountered raw='deschodt n * factoriel(n - 1)' ret=120
+DEBUG: caller_table symbols after call:
+  val -> INT 5 (addr=0x587e502acc70)
+DEBUG: peric resolved='factoriel(5) = 120'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+factoriel(5) = 120
+exit0
+
+===== Running example13.tslang =====
+Function somme(tab -> int[], taille -> int) -> int
+  [ERIC] eric total = 0
+  [FOR] aer i in range(0, taille):
+    (body) total = total + tab[i]
+  [RETURN] deschodt total
+Function Eric() -> int
+  [ERIC] eric valeurs -> int[4]
+  [ASSIGN] valeurs[0] = 4
+  [ASSIGN] valeurs[1] = 7
+  [ASSIGN] valeurs[2] = 2
+  [ASSIGN] valeurs[3] = 9
+  [ERIC] eric res = somme(valeurs, 4)
+  [PERIC] peric("Somme = {res}")
+  [RETURN] deschodt 0
+DEBUG: parse_factor lookup 'valeurs' -> (not found)
+DEBUG: alias created tab[0] -> valeurs[0]
+DEBUG: alias created tab[1] -> valeurs[1]
+DEBUG: alias created tab[2] -> valeurs[2]
+DEBUG: alias created tab[3] -> valeurs[3]
+DEBUG: parse_factor lookup 'taille' -> 4
+DEBUG: parse_factor lookup 'total' -> 0
+DEBUG: parse_factor lookup 'i' -> 0
+DEBUG: parse_factor lookup 'tab[0]' -> 4
+DEBUG: parse_factor lookup 'total' -> 4
+DEBUG: parse_factor lookup 'i' -> 1
+DEBUG: parse_factor lookup 'tab[1]' -> 7
+DEBUG: parse_factor lookup 'total' -> 11
+DEBUG: parse_factor lookup 'i' -> 2
+DEBUG: parse_factor lookup 'tab[2]' -> 2
+DEBUG: parse_factor lookup 'total' -> 13
+DEBUG: parse_factor lookup 'i' -> 3
+DEBUG: parse_factor lookup 'tab[3]' -> 9
+DEBUG: parse_factor lookup 'total' -> 22
+DEBUG: ST_RETURN encountered raw='deschodt total' ret=22
+DEBUG: caller_table symbols after call:
+  valeurs[3] -> INT 9 (addr=0x558a13e8a1b0)
+  valeurs[2] -> INT 2 (addr=0x558a13e8a150)
+  valeurs[1] -> INT 7 (addr=0x558a13e8a0f0)
+  valeurs[0] -> INT 4 (addr=0x558a13e8a090)
+DEBUG: peric resolved='Somme = 22'
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+Somme = 22
+exit0
+
+===== Running example14.tslang =====
+Function accelerate(v -> Voiture*, bonus -> int) -> void
+  [ASSIGN] v.vitesse = v.vitesse + bonus
+  [PERIC] peric("{v.marque} roule à {v.vitesse} km/h")
+Function Eric() -> int
+  [ERIC] eric car -> Voiture
+  [ASSIGN] car.marque = "Peugeot"
+  [ASSIGN] car.vitesse = 100
+  [OTHER] accelerate(&car, 20)
+  [RETURN] deschodt 0
+DEBUG: alias created v.vitesse -> car.vitesse
+DEBUG: alias created v.marque -> car.marque
+DEBUG: parse_factor lookup 'v.vitesse' -> 100
+DEBUG: parse_factor lookup 'bonus' -> 20
+DEBUG: peric resolved='Peugeot roule à 120 km/h'
+DEBUG: caller_table symbols after call:
+  v.marque -> ALIAS to car.marque (alias_target=0x63b5fd950e70)
+  v.vitesse -> ALIAS to car.vitesse (alias_target=0x63b5fd950ef0)
+  car.vitesse -> INT 120 (addr=0x63b5fd950f00)
+  car.marque -> STR 'Peugeot' (sval=0x63b5fd950ed0)
+  car -> INT 0 (addr=0x63b5fd950e00)
+DEBUG: ST_RETURN encountered raw='deschodt 0' ret=0
+Wrote a.out
+Peugeot roule à 120 km/h
+exit0
+
