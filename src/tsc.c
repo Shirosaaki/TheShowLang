@@ -199,7 +199,7 @@ int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, in
    first step before implementing a full expression parser and native codegen.
 */
 
-typedef enum { ST_PERIC, ST_ERIC_DECL, ST_ASSIGN, ST_RETURN, ST_OTHER, ST_FOR, ST_WHILE, ST_IF } StmtKind;
+typedef enum { ST_PERIC, ST_ERIC_DECL, ST_ASSIGN, ST_RETURN, ST_CONTINUE, ST_BREAK, ST_OTHER, ST_FOR, ST_WHILE, ST_IF } StmtKind;
 
 typedef struct Stmt {
     StmtKind kind;
@@ -447,12 +447,17 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
         } else if (s->kind == ST_RETURN) { const char *p = s->raw + strlen("deschodt"); while (*p==' '||*p=='\t') p++; if (*p) { *retcode_p = atoi(p); }
             printf("DEBUG: ST_RETURN encountered raw='%s' ret=%d\n", s->raw, *retcode_p);
             return 1; }
+        else if (s->kind == ST_CONTINUE) { /* continue */ return 2; }
+        else if (s->kind == ST_BREAK) { /* break */ return 3; }
         else if (s->kind == ST_FOR) {
             if (!s->cond || !s->it_name) { s = s->next; continue; }
             char *cpy = my_strdup(s->cond); char *comma = strchr(cpy, ','); long long start = 0, end = 0; if (comma) { *comma='\0'; start = eval_int_expr(cpy); end = eval_int_expr(comma+1); } else { start = eval_int_expr(cpy); end = start; }
             for (long long ii = start; ii < end; ++ii) {
                 sym_set_int(s->it_name, ii);
-                if (exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p)) { free(cpy); return 1; }
+                int code = exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p);
+                if (code == 1) { free(cpy); return 1; }
+                if (code == 2) { /* continue */ continue; }
+                if (code == 3) { /* break */ break; }
             }
             free(cpy);
         } else if (s->kind == ST_WHILE) {
@@ -461,7 +466,10 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
             while (1) {
                 long long v = eval_int_expr(s->cond);
                 if (!v) break;
-                if (exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p)) return 1;
+                int code = exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p);
+                if (code == 1) return 1;
+                if (code == 2) { /* continue */ ; }
+                if (code == 3) break;
                 if (++safety > 10000) break;
             }
         } else if (s->kind == ST_IF) {
@@ -481,8 +489,13 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
             }
             long long v = eval_int_expr(s->cond);
             printf("DEBUG: cond '%s' => %lld\n", s->cond, v);
-            if (v) { if (exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p)) return 1; }
-            else { if (exec_stmt_list(s->else_body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p)) return 1; }
+            if (v) {
+                int code = exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p);
+                if (code != 0) return code;
+            } else {
+                int code = exec_stmt_list(s->else_body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p);
+                if (code != 0) return code;
+            }
         }
         s = s->next;
     }
@@ -582,6 +595,8 @@ static Program *parse_program(const char *src) {
                 if (strncmp(tpeek, "peric(", 6) == 0) append_stmt(&curf->body, make_stmt_indent(ST_PERIC, tpeek, pindent));
                 else if (strncmp(tpeek, "eric ", 5) == 0) append_stmt(&curf->body, make_stmt_indent(ST_ERIC_DECL, tpeek, pindent));
                 else if (strncmp(tpeek, "deschodt", 8) == 0) append_stmt(&curf->body, make_stmt_indent(ST_RETURN, tpeek, pindent));
+                else if (strncmp(tpeek, "deschontinue", 12) == 0) append_stmt(&curf->body, make_stmt_indent(ST_CONTINUE, tpeek, pindent));
+                else if (strncmp(tpeek, "deschreak", 9) == 0) append_stmt(&curf->body, make_stmt_indent(ST_BREAK, tpeek, pindent));
                 else if (strncmp(tpeek, "aer ", 4) == 0) {
                     // format: aer i in range(0, 5):
                     Stmt *st = make_stmt(ST_FOR, tpeek);
@@ -604,7 +619,32 @@ static Program *parse_program(const char *src) {
                         /* recognize simple statements inside body */
                         if (strncmp(tinner, "peric(", 6) == 0) append_stmt(&st->body, make_stmt_indent(ST_PERIC, tinner, iindent));
                         else if (strncmp(tinner, "eric ", 5) == 0) append_stmt(&st->body, make_stmt_indent(ST_ERIC_DECL, tinner, iindent));
+                        else if (strncmp(tinner, "erif ", 5) == 0) {
+                            /* nested if inside for */
+                            Stmt *ifs = make_stmt(ST_IF, tinner);
+                            const char *op = strchr(tinner, '('); const char *cl = strchr(tinner, ')'); if (op && cl && cl > op) { size_t clen = cl-op-1; ifs->cond = malloc(clen+1); memcpy(ifs->cond, op+1, clen); ifs->cond[clen]='\0'; }
+                            ifs->indent = iindent;
+                            /* consume nested if-body lines */
+                            char *inner2 = strtok(NULL, "\n");
+                            while (inner2) {
+                                char *r2 = inner2; int ind2 = 0; while (r2[ind2]==' '||r2[ind2]=='\t') ind2++; char *t2 = trim(inner2);
+                                if (t2[0] == '\0') { inner2 = strtok(NULL, "\n"); continue; }
+                                if (ind2 <= iindent) break;
+                                if (strncmp(t2, "peric(", 6) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_PERIC, t2, ind2));
+                                else if (strncmp(t2, "eric ", 5) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_ERIC_DECL, t2, ind2));
+                                else if (strncmp(t2, "deschodt", 8) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_RETURN, t2, ind2));
+                                else if (strncmp(t2, "deschontinue", 12) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_CONTINUE, t2, ind2));
+                                else if (strncmp(t2, "deschreak", 9) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_BREAK, t2, ind2));
+                                else if (strchr(t2, '=') != NULL) append_stmt(&ifs->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
+                                else append_stmt(&ifs->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                inner2 = strtok(NULL, "\n");
+                            }
+                            append_stmt(&st->body, ifs);
+                            inner = inner2; if (!inner) break; continue;
+                        }
                         else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
+                        else if (strncmp(tinner, "deschontinue", 12) == 0) append_stmt(&st->body, make_stmt_indent(ST_CONTINUE, tinner, iindent));
+                        else if (strncmp(tinner, "deschreak", 9) == 0) append_stmt(&st->body, make_stmt_indent(ST_BREAK, tinner, iindent));
                         else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
                         else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
                         inner = strtok(NULL, "\n");
@@ -625,9 +665,33 @@ static Program *parse_program(const char *src) {
                         char *iraw = innerw; int iindent = 0; while (iraw[iindent]==' '||iraw[iindent]=='\t') iindent++; char *tinner = trim(innerw);
                         if (tinner[0] == '\0') { innerw = strtok(NULL, "\n"); continue; }
                         if (iindent <= pindent) break;
+                        if (strncmp(tinner, "erif ", 5) == 0) {
+                            /* nested if inside while */
+                            Stmt *ifs = make_stmt(ST_IF, tinner);
+                            const char *op = strchr(tinner, '('); const char *cl = strchr(tinner, ')'); if (op && cl && cl > op) { size_t clen = cl-op-1; ifs->cond = malloc(clen+1); memcpy(ifs->cond, op+1, clen); ifs->cond[clen]='\0'; }
+                            ifs->indent = iindent;
+                            char *inner2 = strtok(NULL, "\n");
+                            while (inner2) {
+                                char *r2 = inner2; int ind2 = 0; while (r2[ind2]==' '||r2[ind2]=='\t') ind2++; char *t2 = trim(inner2);
+                                if (t2[0] == '\0') { inner2 = strtok(NULL, "\n"); continue; }
+                                if (ind2 <= iindent) break;
+                                if (strncmp(t2, "peric(", 6) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_PERIC, t2, ind2));
+                                else if (strncmp(t2, "eric ", 5) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_ERIC_DECL, t2, ind2));
+                                else if (strncmp(t2, "deschodt", 8) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_RETURN, t2, ind2));
+                                else if (strncmp(t2, "deschontinue", 12) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_CONTINUE, t2, ind2));
+                                else if (strncmp(t2, "deschreak", 9) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_BREAK, t2, ind2));
+                                else if (strchr(t2, '=') != NULL) append_stmt(&ifs->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
+                                else append_stmt(&ifs->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                inner2 = strtok(NULL, "\n");
+                            }
+                            append_stmt(&st->body, ifs);
+                            innerw = inner2; if (!innerw) break; continue;
+                        }
                         if (strncmp(tinner, "peric(", 6) == 0) append_stmt(&st->body, make_stmt_indent(ST_PERIC, tinner, iindent));
                         else if (strncmp(tinner, "eric ", 5) == 0) append_stmt(&st->body, make_stmt_indent(ST_ERIC_DECL, tinner, iindent));
                         else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
+                        else if (strncmp(tinner, "deschontinue", 12) == 0) append_stmt(&st->body, make_stmt_indent(ST_CONTINUE, tinner, iindent));
+                        else if (strncmp(tinner, "deschreak", 9) == 0) append_stmt(&st->body, make_stmt_indent(ST_BREAK, tinner, iindent));
                         else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
                         else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
                         innerw = strtok(NULL, "\n");
@@ -649,6 +713,8 @@ static Program *parse_program(const char *src) {
                         if (strncmp(tinner, "peric(", 6) == 0) append_stmt(&st->body, make_stmt_indent(ST_PERIC, tinner, iindent));
                         else if (strncmp(tinner, "eric ", 5) == 0) append_stmt(&st->body, make_stmt_indent(ST_ERIC_DECL, tinner, iindent));
                         else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
+                        else if (strncmp(tinner, "deschontinue", 12) == 0) append_stmt(&st->body, make_stmt_indent(ST_CONTINUE, tinner, iindent));
+                        else if (strncmp(tinner, "deschreak", 9) == 0) append_stmt(&st->body, make_stmt_indent(ST_BREAK, tinner, iindent));
                         else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
                         else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
                         inneri = strtok(NULL, "\n");
@@ -671,6 +737,8 @@ static Program *parse_program(const char *src) {
                                 if (strncmp(ttr, "peric(", 6) == 0) { printf("appending to else_body: %s\n", ttr); append_stmt(&last->else_body, make_stmt(ST_PERIC, ttr)); }
                                 else if (strncmp(ttr, "eric ", 5) == 0) append_stmt(&last->else_body, make_stmt(ST_ERIC_DECL, ttr));
                                 else if (strncmp(ttr, "deschodt", 8) == 0) append_stmt(&last->else_body, make_stmt(ST_RETURN, ttr));
+                                else if (strncmp(ttr, "deschontinue", 12) == 0) append_stmt(&last->else_body, make_stmt(ST_CONTINUE, ttr));
+                                else if (strncmp(ttr, "deschreak", 9) == 0) append_stmt(&last->else_body, make_stmt(ST_BREAK, ttr));
                                 else if (strchr(ttr, '=') != NULL) append_stmt(&last->else_body, make_stmt(ST_ASSIGN, ttr));
                                 else append_stmt(&last->else_body, make_stmt(ST_OTHER, ttr));
                             elsepeek = strtok(NULL, "\n");
