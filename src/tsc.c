@@ -231,8 +231,14 @@ static long long call_function_compiletime(Function *fn, long long *args, int na
 static long long call_function_compiletime_with_refs(Function *fn, long long *arg_vals, char **arg_names, int *by_ref, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
 static char *trim(char *s);
 
+/* forward declaration for helper used when normalizing LHS in assignments */
+static char *extract_ident_from_lhs(const char *s, char *out, size_t outsz);
+
 /* forward-declare eval_int_expr so parse_factor can call it without implicit decl */
 static long long eval_int_expr(const char *expr);
+
+/* forward-declare helper to create temporary literal string symbols */
+static char *create_literal_string(const char *lit);
 
 /* Global pointers to the current message buffers used during exec_stmt_list.
     These are set by execute_function_compiletime and call_function_compiletime helpers
@@ -387,6 +393,20 @@ static long long parse_factor(ExprState *e) {
                 if (res && res->type == SYM_INT) {
                     printf("DEBUG: parse_factor lookup '%s' -> %lld\n", key, res->ival);
                     return res->ival;
+                }
+            }
+            /* Fallback: if 'name' resolves to a string, return the character code at index */
+            Sym *base = sym_get(name);
+            if (base) {
+                Sym *r = sym_resolve(base);
+                if (r && r->type == SYM_STR && r->sval) {
+                    size_t sl = strlen(r->sval);
+                    if (idx >= 0 && (size_t)idx < sl) {
+                        unsigned char c = (unsigned char)r->sval[idx];
+                        printf("DEBUG: parse_factor string lookup '%s'[%lld] -> %d\n", name, idx, c);
+                        return (long long)c;
+                    }
+                    return 0;
                 }
             }
             printf("DEBUG: parse_factor lookup '%s' -> (not found)\n", key);
@@ -562,6 +582,12 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                                     argnames[argcnt] = my_strdup(n);
                                                     byref[argcnt] = 1;
                                                     argvals[argcnt] = 0;
+                                                } else if (t[0] == '"') {
+                                                    /* literal string argument: create temporary literal symbol and pass its name */
+                                                    char *tmpname = create_literal_string(t);
+                                                    argnames[argcnt] = tmpname;
+                                                    byref[argcnt] = 0;
+                                                    argvals[argcnt] = 0;
                                                 } else {
                                                     /* if the token is a plain identifier, record its name so callee can alias arrays */
                                                     int is_id = 1; for (int _i=0; t[_i]; ++_i) { char _c = t[_i]; if (!((_c>='a'&&_c<='z')||(_c>='A'&&_c<='Z')||_c=='_'||(_c>='0'&&_c<='9')||_c=='.')) { is_id = 0; break; } }
@@ -619,7 +645,10 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 const char *lhs_start = p; while (*lhs_start == ' '||*lhs_start=='\t') lhs_start++;
                 const char *lhs_end = eq; while (lhs_end > lhs_start && (*(lhs_end-1)==' '||*(lhs_end-1)=='\t')) lhs_end--;
                 int namelen = lhs_end - lhs_start;
-                char name[256]; if (namelen >= (int)sizeof(name)) namelen = sizeof(name)-1; memcpy(name, lhs_start, namelen); name[namelen] = '\0';
+                char raw_lhs[256]; if (namelen >= (int)sizeof(raw_lhs)) namelen = sizeof(raw_lhs)-1; memcpy(raw_lhs, lhs_start, namelen); raw_lhs[namelen] = '\0';
+                /* detect if LHS is a dereference like '*name' (first non-space is '*') */
+                int deref_flag = 0; for (int _i=0; raw_lhs[_i]; ++_i) { if (raw_lhs[_i] == ' ' || raw_lhs[_i] == '\t') continue; if (raw_lhs[_i] == '*') deref_flag = 1; break; }
+                char name[256]; extract_ident_from_lhs(raw_lhs, name, sizeof(name));
                 const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
                 if (rhs[0] == '"') {
                     const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
@@ -667,9 +696,9 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                         sym_set_int(name, v);
                     }
                 }
-                /* handle deref assignment: if LHS starts with '*' then update alias target */
-                if (name[0] == '*') {
-                    char *n = name + 1; char *ntrim = trim(n);
+                /* handle deref assignment (if original LHS used *name) */
+                if (deref_flag) {
+                    char *ntrim = name;
                     Sym *s2 = sym_get(ntrim);
                     if (s2) {
                         Sym *t = sym_resolve(s2);
@@ -763,12 +792,13 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 char argsbuf[256]; int alen = cl - op - 1; if (alen >= (int)sizeof(argsbuf)) alen = sizeof(argsbuf)-1; memcpy(argsbuf, op+1, alen); argsbuf[alen] = '\0';
                 long long argvals[8]; int argcnt = 0; char *argnames[8]; int byref[8]; for (int ii=0; ii<8; ++ii) { argnames[ii]=NULL; byref[ii]=0; argvals[ii]=0; }
                 char *cpy = my_strdup(argsbuf); char *tok = strtok(cpy, ",");
-                while (tok && argcnt < 8) {
-                    char *t = trim(tok);
-                    if (t[0] == '&') { char *n = trim(t+1); argnames[argcnt] = my_strdup(n); byref[argcnt] = 1; argvals[argcnt]=0; }
-                    else { argnames[argcnt]=NULL; byref[argcnt]=0; argvals[argcnt]=eval_int_expr(t); }
-                    argcnt++; tok = strtok(NULL, ",");
-                }
+                            while (tok && argcnt < 8) {
+                                char *t = trim(tok);
+                                if (t[0] == '&') { char *n = trim(t+1); argnames[argcnt] = my_strdup(n); byref[argcnt] = 1; argvals[argcnt]=0; }
+                                else if (t[0] == '"') { argnames[argcnt] = create_literal_string(t); byref[argcnt]=0; argvals[argcnt]=0; }
+                                else { argnames[argcnt]=NULL; byref[argcnt]=0; argvals[argcnt]=eval_int_expr(t); }
+                                argcnt++; tok = strtok(NULL, ",");
+                            }
                 free(cpy);
                 Function *fn = find_function(ftrim);
                 if (fn) {
@@ -837,6 +867,57 @@ static char *trim(char *s) {
     char *end = s + strlen(s) - 1;
     while (end > s && (*end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) { *end = '\0'; --end; }
     return s;
+}
+
+/* Extract the effective identifier from a left-hand-side string.
+     Examples:
+         "char *str" -> out="str"
+         "valeurs[0]" -> out="valeurs[0]"
+         "car.marque" -> out="car.marque"
+     out must be provided with outsz bytes; function returns out. */
+static char *extract_ident_from_lhs(const char *s, char *out, size_t outsz) {
+        if (!s || !out || outsz == 0) return NULL;
+        int len = strlen(s);
+        int i = len - 1;
+        // skip trailing whitespace
+        while (i >= 0 && (s[i] == ' ' || s[i] == '\t')) --i;
+        if (i < 0) { out[0] = '\0'; return out; }
+        // now find start of token: allow letters, digits, '_', '.', '[', ']', '*'
+        int end = i;
+        // if ends with ']' find matching '[' and include index
+        if (s[i] == ']') {
+                // move left until '[' or non-digit
+                while (i >= 0 && s[i] != '[') --i;
+                // move further left to include identifier
+                --i;
+        }
+        // move left while char is part of identifier or dot
+        while (i >= 0 && ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '.' || s[i] == '[' || s[i] == ']')) --i;
+        int start = i + 1;
+        int copylen = end - start + 1;
+        if (copylen >= (int)outsz) copylen = outsz - 1;
+        if (copylen > 0) memcpy(out, s + start, copylen); else out[0] = '\0';
+        out[copylen] = '\0';
+        return out;
+}
+
+/* Create a temporary literal string symbol in the current symbol table and return its name (caller must free). */
+static int g_litstr_counter = 0;
+static char *create_literal_string(const char *lit) {
+    if (!lit) return NULL;
+    /* lit points to a quoted string ("...") or just content; normalize by removing surrounding quotes if present */
+    const char *start = lit;
+    if (*start == '"') start++;
+    size_t len = strlen(start);
+    const char *end = start + len - 1;
+    if (len > 0 && *end == '"') { len--; }
+    char *buf = malloc(len + 1);
+    memcpy(buf, start, len);
+    buf[len] = '\0';
+    char name[64]; snprintf(name, sizeof(name), "__litstr_%d", g_litstr_counter++);
+    sym_set_str(name, buf);
+    free(buf);
+    return my_strdup(name);
 }
 
 static Stmt *make_stmt(StmtKind k, const char *rawline) {
@@ -995,7 +1076,30 @@ static Program *parse_program(const char *src) {
                         char *iraw = innerw; int iindent = 0; while (iraw[iindent]==' '||iraw[iindent]=='\t') iindent++; char *tinner = trim(innerw);
                         if (tinner[0] == '\0') { innerw = strtok(NULL, "\n"); continue; }
                         if (iindent <= pindent) break;
-                        if (strncmp(tinner, "erif ", 5) == 0) {
+                        if (strncmp(tinner, "darius ", 7) == 0) {
+                            /* nested while inside while */
+                            Stmt *nwh = make_stmt(ST_WHILE, tinner);
+                            const char *nop = strchr(tinner, '('); const char *ncl = strchr(tinner, ')');
+                            if (nop && ncl && ncl > nop) { size_t nlen = ncl - nop - 1; nwh->cond = malloc(nlen + 1); memcpy(nwh->cond, nop+1, nlen); nwh->cond[nlen] = '\0'; }
+                            nwh->indent = iindent;
+                            /* consume nested while-body lines */
+                            char *inner2 = strtok(NULL, "\n");
+                            while (inner2) {
+                                char *r2 = inner2; int ind2 = 0; while (r2[ind2]==' '||r2[ind2]=='\t') ind2++; char *t2 = trim(inner2);
+                                if (t2[0] == '\0') { inner2 = strtok(NULL, "\n"); continue; }
+                                if (ind2 <= iindent) break;
+                                if (strncmp(t2, "peric(", 6) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_PERIC, t2, ind2));
+                                else if (strncmp(t2, "eric ", 5) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_ERIC_DECL, t2, ind2));
+                                else if (strncmp(t2, "deschodt", 8) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_RETURN, t2, ind2));
+                                else if (strncmp(t2, "deschontinue", 12) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_CONTINUE, t2, ind2));
+                                else if (strncmp(t2, "deschreak", 9) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_BREAK, t2, ind2));
+                                else if (strchr(t2, '=') != NULL) append_stmt(&nwh->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
+                                else append_stmt(&nwh->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                inner2 = strtok(NULL, "\n");
+                            }
+                            append_stmt(&st->body, nwh);
+                            innerw = inner2; if (!innerw) break; continue;
+                        } else if (strncmp(tinner, "erif ", 5) == 0) {
                             /* nested if inside while */
                             Stmt *ifs = make_stmt(ST_IF, tinner);
                             const char *op = strchr(tinner, '('); const char *cl = strchr(tinner, ')'); if (op && cl && cl > op) { size_t clen = cl-op-1; ifs->cond = malloc(clen+1); memcpy(ifs->cond, op+1, clen); ifs->cond[clen]='\0'; }
@@ -1189,34 +1293,56 @@ static void print_program(Program *p) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <source.tslang> <out_binary>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <src1.tslang> [<src2.tslang> ...] <out_binary>\n", argv[0]);
         return 1;
     }
-    const char *src_path = argv[1];
-    const char *out_path = argv[2];
+    const char *out_path = argv[argc-1];
+    /* concatenate all input sources (argv[1..argc-2]) into one buffer, handling johnsenat includes */
+    size_t total_cap = 4096; char *buf = malloc(total_cap); if (!buf) { fprintf(stderr, "alloc fail\n"); return 1; } buf[0] = '\0';
+    for (int ai = 1; ai < argc-1; ++ai) {
+        const char *src_path = argv[ai];
+        FILE *s = fopen(src_path, "rb");
+        if (!s) { perror("fopen src"); return 1; }
+        fseek(s, 0, SEEK_END);
+        long sz = ftell(s);
+        fseek(s, 0, SEEK_SET);
+        char *part = malloc(sz + 1);
+        if (!part) { fclose(s); fprintf(stderr, "alloc fail\n"); return 1; }
+        fread(part, 1, sz, s);
+        part[sz] = '\0';
+        fclose(s);
+        /* append part to buf */
+        size_t need = strlen(buf) + strlen(part) + 2;
+        if (need > total_cap) { total_cap = need * 2; buf = realloc(buf, total_cap); }
+        strcat(buf, part);
+        strcat(buf, "\n");
+        free(part);
+    }
 
-    FILE *s = fopen(src_path, "rb");
-    if (!s) { perror("fopen src"); return 1; }
-    fseek(s, 0, SEEK_END);
-    long sz = ftell(s);
-    fseek(s, 0, SEEK_SET);
-    char *buf = malloc(sz + 1);
-    if (!buf) { fclose(s); fprintf(stderr, "alloc fail\n"); return 1; }
-    fread(buf, 1, sz, s);
-    buf[sz] = '\0';
-    fclose(s);
-
-    // Remove 'desnote' comment lines into a filtered buffer
-    char *filtered = malloc(sz + 1);
+    // Remove 'desnote' comment lines and process johnsenat includes into a filtered buffer
+    char *filtered = malloc(strlen(buf) + 1024);
     filtered[0] = '\0';
     char *copy2 = my_strdup(buf);
     char *ln = strtok(copy2, "\n");
     while (ln) {
         char *t = trim(ln);
-        if (strncmp(t, "desnote", 7) != 0) {
-            strcat(filtered, ln);
-            strcat(filtered, "\n");
+        if (strncmp(t, "desnote", 7) == 0) { ln = strtok(NULL, "\n"); continue; }
+        if (strncmp(t, "johnsenat ", 10) == 0) {
+            const char *inc = t + 10; while (*inc == ' '||*inc=='\t') ++inc; char *incf = trim(my_strdup((char*)inc));
+            FILE *h = fopen(incf, "rb");
+            if (h) {
+                fseek(h, 0, SEEK_END); long hsz = ftell(h); fseek(h, 0, SEEK_SET);
+                char *hbuf = malloc(hsz + 1); if (hbuf) { fread(hbuf,1,hsz,h); hbuf[hsz]='\0'; strcat(filtered, hbuf); strcat(filtered, "\n"); free(hbuf); }
+                fclose(h);
+            } else {
+                fprintf(stderr, "warning: include file '%s' not found\n", incf);
+            }
+            free(incf);
+            ln = strtok(NULL, "\n");
+            continue;
         }
+        strcat(filtered, ln);
+        strcat(filtered, "\n");
         ln = strtok(NULL, "\n");
     }
 

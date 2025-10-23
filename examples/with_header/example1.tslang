@@ -1,7 +1,9 @@
-johnsenat example1.hlang
+johnsenat "example1.hlang"
 
 Deschodt Eric() -> int
     char *str = "Hello, world!"
     eric length = my_strlen(str)
-    peric("Length of the string is: {length}")
+    peric("Length of the string {str} is: {length}")
+    eric res = my_strcmp("ab", "abc")
+    peric("Comparison result between 'abc' and 'abc': {res}")
     deschodt 0

@@ -1,1 +1,2 @@
 Deschodt my_strlen(s -> char *) -> int
+Deschodt my_strcmp(s1 -> char *, s2 -> char *) -> int
