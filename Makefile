@@ -9,8 +9,15 @@ SRC	=	${wildcard src/*.c}
 
 OBJ	=	${SRC:.c=.o}
 
-all:	${OBJ}
-	gcc -o tcs ${OBJ}
+BIN_DIR = bin
+
+all: ${BIN_DIR}/tsc
+
+${BIN_DIR}/tsc: src/tsc.c | ${BIN_DIR}
+	$(CC) -std=c11 -O2 -o $@ src/tsc.c
+
+${BIN_DIR}:
+	mkdir -p ${BIN_DIR}
 
 clean:
 	rm -f ${OBJ}
