@@ -14,3 +14,5 @@ Deschodt Eric() -> int
     eric res = somme(valeurs, 4)
     peric("Somme = {res}")
     deschodt 0
+
+=> print Somme = 22

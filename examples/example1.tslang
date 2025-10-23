@@ -1,3 +1,5 @@
 Deschodt Eric() -> int
     peric("Salut, monde !")
     deschodt 0
+
+=> print Salut, monde !

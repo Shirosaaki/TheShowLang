@@ -4,3 +4,5 @@ Deschodt Eric() -> int
 
     peric("Bonjour {nom}, tu as {age} ans.")
     deschodt 0
+
+=> print Bonjour Mathéo, tu as 21 ans.

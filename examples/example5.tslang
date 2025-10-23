@@ -9,3 +9,5 @@ Deschodt Eric() -> int
 
     peric("Nom: {p.nom}, Age: {p.age}")
     deschodt 0
+
+=> print Nom: Alice, Age: 25

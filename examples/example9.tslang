@@ -5,3 +5,5 @@ Deschodt Eric() -> int
     eric result = addition(5, 7)
     peric("Résultat : {result}")
     deschodt 0
+
+=> print Résultat : 12

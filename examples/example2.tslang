@@ -1,7 +1,10 @@
 Deschodt Eric() -> int
     eric x -> int
     eric y = 10
+    x = 5
     eric z = x + y
 
     peric("x = {x}, y = {y}, z = {z}")
     deschodt 0
+
+=> print x = 5, y = 10, z = 15

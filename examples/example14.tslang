@@ -13,3 +13,5 @@ Deschodt Eric() -> int
 
     accelerate(&car, 20)
     deschodt 0
+
+=> print Peugeot roule à 120 km/h

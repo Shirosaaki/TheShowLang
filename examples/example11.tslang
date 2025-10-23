@@ -6,3 +6,5 @@ Deschodt Eric() -> int
     incremente(&n)
     peric("n = {n}")
     deschodt 0
+
+=> print n = 11

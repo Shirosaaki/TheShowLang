@@ -57,7 +57,7 @@ static int extract_deschodt_int(const char *src, int default_ret) {
 
 // Emit a minimal ELF64 file with one PT_LOAD segment and executable code.
 // The code will perform write(1, msg, len) and exit(status).
-int emit_elf(const char *out_path, const char *msg, int retcode) {
+int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, int n_msgs, int retcode) {
     FILE *f = fopen(out_path, "wb");
     if (!f) { perror("fopen"); return 1; }
 
@@ -78,29 +78,46 @@ int emit_elf(const char *out_path, const char *msg, int retcode) {
     //   syscall
     // Then message bytes follow.
 
-     unsigned int msg_len = (unsigned int)strlen(msg);
+    unsigned int total_msg_bytes = 0;
+    for (int i = 0; i < n_msgs; ++i) total_msg_bytes += msg_lens[i];
 
-     /* Build machine code into a buffer with zeroed displacement, then
-         patch the lea displacement after we know the final code length. */
-     unsigned char final_code[512];
+     /* Build machine code into a buffer with zeroed displacement placeholders
+         for each message, then patch them after we know final code size. */
+     unsigned char final_code[1500];
      size_t fi = 0;
 
      // mov rax,1
      final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc0; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
      // mov rdi,1
      final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc7; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
-     // lea rsi,[rip+disp]
-     final_code[fi++] = 0x48; final_code[fi++] = 0x8d; final_code[fi++] = 0x35;
-     size_t disp_index = fi; // remember where to patch 4-byte disp
-     final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0;
-     // mov rdx, msg_len
-     final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc2;
-     final_code[fi++] = (unsigned char)(msg_len & 0xff);
-     final_code[fi++] = (unsigned char)((msg_len>>8)&0xff);
-     final_code[fi++] = (unsigned char)((msg_len>>16)&0xff);
-     final_code[fi++] = (unsigned char)((msg_len>>24)&0xff);
-     // syscall
-     final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
+
+     // For each message, emit: lea rsi,[rip+disp] ; mov rdx,len ; syscall
+     // Track where each displacement should be patched and next_instr offsets.
+     int *disp_positions = malloc(sizeof(int) * n_msgs);
+     int *next_instr_offsets = malloc(sizeof(int) * n_msgs);
+     unsigned long *msg_offsets_within_messages = malloc(sizeof(unsigned long) * n_msgs);
+     unsigned long cum_msg = 0;
+     for (int i = 0; i < n_msgs; ++i) {
+          // lea rsi,[rip+disp]
+          final_code[fi++] = 0x48; final_code[fi++] = 0x8d; final_code[fi++] = 0x35;
+          disp_positions[i] = fi;
+          final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; // placeholder
+          // next_instr offset is offset_of_lea + 7
+          next_instr_offsets[i] = (int)(fi - 7 + 7);
+          // mov rdx, len
+          final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc2;
+          unsigned int L = msg_lens[i];
+          final_code[fi++] = (unsigned char)(L & 0xff);
+          final_code[fi++] = (unsigned char)((L>>8)&0xff);
+          final_code[fi++] = (unsigned char)((L>>16)&0xff);
+          final_code[fi++] = (unsigned char)((L>>24)&0xff);
+          // syscall
+          final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
+          msg_offsets_within_messages[i] = cum_msg;
+          cum_msg += msg_lens[i];
+     }
+
+     // After printing messages, do exit syscall with retcode
      // mov rax,60
      final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc0;
      final_code[fi++] = 0x3c; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
@@ -113,19 +130,22 @@ int emit_elf(const char *out_path, const char *msg, int retcode) {
      // syscall
      final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
 
-     /* Now compute displacement for lea rsi,[rip+disp]. The lea's next
-         instruction is at offset (offset_of_lea + 7) from start of code. */
-     unsigned long offset_of_lea = 7 + 7; // first two movs lengths
-     unsigned long next_instr_offset = offset_of_lea + 7; // lea is 7 bytes
-     long disp = (long)(fi) - (long)next_instr_offset;
-     final_code[disp_index + 0] = (unsigned char)(disp & 0xff);
-     final_code[disp_index + 1] = (unsigned char)((disp>>8)&0xff);
-     final_code[disp_index + 2] = (unsigned char)((disp>>16)&0xff);
-     final_code[disp_index + 3] = (unsigned char)((disp>>24)&0xff);
+     /* Compute displacements and patch placeholders. The message i will
+         be placed at file offset: text_off + fi + sum(prev msg lens)
+         The lea's next instruction virtual offset is next_instr_offsets[i]
+         relative to start of code. So disp = (code_size + sum_prev) - next_instr_offset
+     */
+     for (int i = 0; i < n_msgs; ++i) {
+          unsigned long sum_prev = msg_offsets_within_messages[i];
+          long disp_val = (long)(fi + sum_prev) - (long)next_instr_offsets[i];
+          int pos = disp_positions[i];
+          final_code[pos + 0] = (unsigned char)(disp_val & 0xff);
+          final_code[pos + 1] = (unsigned char)((disp_val>>8)&0xff);
+          final_code[pos + 2] = (unsigned char)((disp_val>>16)&0xff);
+          final_code[pos + 3] = (unsigned char)((disp_val>>24)&0xff);
+     }
 
-     /* Now we can write the ELF header and program header with the
-         correct file size (code + message). */
-     unsigned long filesz = fi + msg_len;
+     unsigned long filesz = fi + total_msg_bytes;
 
      unsigned char e_ident[16] = {0x7f,'E','L','F', 2 /*ELFCLASS64*/, 1 /*LE*/, 1 /*EV_CURRENT*/, 0};
      fwrite(e_ident, 1, 16, f);
@@ -157,9 +177,16 @@ int emit_elf(const char *out_path, const char *msg, int retcode) {
      long cur = ftell(f);
      while (cur < (long)text_off) { fputc(0, f); cur++; }
 
-     // Write code and message
+     // Write code
      fwrite(final_code, 1, fi, f);
-     fwrite(msg, 1, msg_len, f);
+     // Write messages concatenated
+     for (int i = 0; i < n_msgs; ++i) {
+          fwrite(msgs[i], 1, msg_lens[i], f);
+     }
+
+     free(disp_positions);
+     free(next_instr_offsets);
+     free(msg_offsets_within_messages);
 
     fclose(f);
     return 0;
@@ -184,15 +211,46 @@ int main(int argc, char **argv) {
     buf[sz] = '\0';
     fclose(s);
 
-    char *msg = extract_peric_string(buf);
-    if (!msg) msg = my_strdup("Hello from TheShowLang!\n");
+    // Collect all peric("...") messages
+    int max_msgs = 16;
+    char **msgs = malloc(sizeof(char*) * max_msgs);
+    unsigned int *msg_lens = malloc(sizeof(unsigned int) * max_msgs);
+    int n_msgs = 0;
+    const char *p = buf;
+    while ((p = strstr(p, "peric(")) != NULL) {
+        const char *q = strchr(p, '"');
+        if (!q) break; q++;
+        const char *rpos = strchr(q, '"');
+        if (!rpos) break;
+        size_t len = rpos - q;
+        char *m = malloc(len + 1);
+        memcpy(m, q, len);
+        m[len] = '\0';
+        if (n_msgs >= max_msgs) {
+            max_msgs *= 2;
+            msgs = realloc(msgs, sizeof(char*) * max_msgs);
+            msg_lens = realloc(msg_lens, sizeof(unsigned int) * max_msgs);
+        }
+        msgs[n_msgs] = m;
+        msg_lens[n_msgs] = (unsigned int)len;
+        n_msgs++;
+        p = rpos + 1;
+    }
+    if (n_msgs == 0) {
+        msgs[0] = my_strdup("Hello from TheShowLang!\n");
+        msg_lens[0] = (unsigned int)strlen(msgs[0]);
+        n_msgs = 1;
+    }
     int ret = extract_deschodt_int(buf, 0);
 
-    int r = emit_elf(out_path, msg, ret);
+    int r = emit_elf(out_path, (const char**)msgs, msg_lens, n_msgs, ret);
     if (r != 0) {
         fprintf(stderr, "emit failed\n");
         return 1;
     }
-    printf("Wrote %s (message=\"%s\", ret=%d)\n", out_path, msg, ret);
+    printf("Wrote %s (message=\"%s\", ret=%d)\n", out_path, msgs[0], ret);
+    for (int i = 0; i < n_msgs; ++i) free(msgs[i]);
+    free(msgs);
+    free(msg_lens);
     return 0;
 }

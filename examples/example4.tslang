@@ -7,3 +7,5 @@ Deschodt Eric() -> int
         peric("Mineur")
 
     deschodt 0
+
+=> print Majeur
