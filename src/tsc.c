@@ -56,9 +56,9 @@ static int extract_deschodt_int(const char *src, int default_ret) {
 }
 
 // Emit a minimal ELF64 file with one PT_LOAD segment and executable code.
-// The code will perform write(1, msg, len) and exit(status).
 int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, int n_msgs, int retcode) {
     FILE *f = fopen(out_path, "wb");
+    if (!f) { perror("fopen"); return 1; }
     if (!f) { perror("fopen"); return 1; }
 
     // We'll place the ELF header and program header at start and
@@ -81,115 +81,605 @@ int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, in
     unsigned int total_msg_bytes = 0;
     for (int i = 0; i < n_msgs; ++i) total_msg_bytes += msg_lens[i];
 
-     /* Build machine code into a buffer with zeroed displacement placeholders
-         for each message, then patch them after we know final code size. */
-     unsigned char final_code[1500];
-     size_t fi = 0;
+    /* Build machine code into a buffer with zeroed displacement placeholders
+       for each message, then patch them after we know final code size. */
+    unsigned char final_code[1500];
+    size_t fi = 0;
 
-     // mov rax,1
-     final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc0; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
-     // mov rdi,1
-     final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc7; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+    // mov rax,1
+    final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc0; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+    // mov rdi,1
+    final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc7; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
 
-     // For each message, emit: lea rsi,[rip+disp] ; mov rdx,len ; syscall
-     // Track where each displacement should be patched and next_instr offsets.
-     int *disp_positions = malloc(sizeof(int) * n_msgs);
-     int *next_instr_offsets = malloc(sizeof(int) * n_msgs);
-     unsigned long *msg_offsets_within_messages = malloc(sizeof(unsigned long) * n_msgs);
-     unsigned long cum_msg = 0;
-     for (int i = 0; i < n_msgs; ++i) {
-          // lea rsi,[rip+disp]
-          final_code[fi++] = 0x48; final_code[fi++] = 0x8d; final_code[fi++] = 0x35;
-          disp_positions[i] = fi;
-          final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; // placeholder
-          // next_instr offset is offset_of_lea + 7
-          next_instr_offsets[i] = (int)(fi - 7 + 7);
-          // mov rdx, len
-          final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc2;
-          unsigned int L = msg_lens[i];
-          final_code[fi++] = (unsigned char)(L & 0xff);
-          final_code[fi++] = (unsigned char)((L>>8)&0xff);
-          final_code[fi++] = (unsigned char)((L>>16)&0xff);
-          final_code[fi++] = (unsigned char)((L>>24)&0xff);
-          // syscall
-          final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
-          msg_offsets_within_messages[i] = cum_msg;
-          cum_msg += msg_lens[i];
-     }
+    // For each message, emit: lea rsi,[rip+disp] ; mov rdx,len ; syscall
+    // Track where each displacement should be patched and next_instr offsets.
+    int *disp_positions = malloc(sizeof(int) * n_msgs);
+    int *next_instr_offsets = malloc(sizeof(int) * n_msgs);
+    unsigned long *msg_offsets_within_messages = malloc(sizeof(unsigned long) * n_msgs);
+    unsigned long cum_msg = 0;
+    for (int i = 0; i < n_msgs; ++i) {
+        // lea rsi,[rip+disp]
+        final_code[fi++] = 0x48; final_code[fi++] = 0x8d; final_code[fi++] = 0x35;
+        disp_positions[i] = fi;
+        final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; // placeholder
+        // next instruction offset (relative to code start) is right after the 4-byte disp
+        next_instr_offsets[i] = (int)(disp_positions[i] + 4);
+        // mov rdx, len
+        final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc2;
+        unsigned int L = msg_lens[i];
+        final_code[fi++] = (unsigned char)(L & 0xff);
+        final_code[fi++] = (unsigned char)((L>>8)&0xff);
+        final_code[fi++] = (unsigned char)((L>>16)&0xff);
+        final_code[fi++] = (unsigned char)((L>>24)&0xff);
+    // mov eax,1 (syscall number for write) - ensure each syscall uses SYS_write
+    final_code[fi++] = 0xb8; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+    // syscall
+    final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
+        msg_offsets_within_messages[i] = cum_msg;
+        cum_msg += msg_lens[i];
+    }
 
-     // After printing messages, do exit syscall with retcode
-     // mov rax,60
-     final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc0;
-     final_code[fi++] = 0x3c; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
-     // mov rdi,retcode
-     final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc7;
-     final_code[fi++] = (unsigned char)(retcode & 0xff);
-     final_code[fi++] = (unsigned char)((retcode>>8)&0xff);
-     final_code[fi++] = (unsigned char)((retcode>>16)&0xff);
-     final_code[fi++] = (unsigned char)((retcode>>24)&0xff);
-     // syscall
-     final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
+    // After printing messages, do exit syscall with retcode
+    // mov eax,60 (syscall number for exit)
+    final_code[fi++] = 0xb8; final_code[fi++] = 0x3c; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+    // mov rdi,retcode
+    final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc7;
+    final_code[fi++] = (unsigned char)(retcode & 0xff);
+    final_code[fi++] = (unsigned char)((retcode>>8)&0xff);
+    final_code[fi++] = (unsigned char)((retcode>>16)&0xff);
+    final_code[fi++] = (unsigned char)((retcode>>24)&0xff);
+    // syscall
+    final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
 
-     /* Compute displacements and patch placeholders. The message i will
-         be placed at file offset: text_off + fi + sum(prev msg lens)
-         The lea's next instruction virtual offset is next_instr_offsets[i]
-         relative to start of code. So disp = (code_size + sum_prev) - next_instr_offset
-     */
-     for (int i = 0; i < n_msgs; ++i) {
-          unsigned long sum_prev = msg_offsets_within_messages[i];
-          long disp_val = (long)(fi + sum_prev) - (long)next_instr_offsets[i];
-          int pos = disp_positions[i];
-          final_code[pos + 0] = (unsigned char)(disp_val & 0xff);
-          final_code[pos + 1] = (unsigned char)((disp_val>>8)&0xff);
-          final_code[pos + 2] = (unsigned char)((disp_val>>16)&0xff);
-          final_code[pos + 3] = (unsigned char)((disp_val>>24)&0xff);
-     }
+    /* Compute displacements and patch placeholders. The message i will
+       be placed at file offset: text_off + fi + sum(prev msg lens)
+       The lea's next instruction virtual offset is next_instr_offsets[i]
+       relative to start of code. So disp = (code_size + sum_prev) - next_instr_offset
+    */
+    for (int i = 0; i < n_msgs; ++i) {
+        unsigned long sum_prev = msg_offsets_within_messages[i];
+        long disp_val = (long)(fi + sum_prev) - (long)next_instr_offsets[i];
+        int pos = disp_positions[i];
+        final_code[pos + 0] = (unsigned char)(disp_val & 0xff);
+        final_code[pos + 1] = (unsigned char)((disp_val>>8)&0xff);
+        final_code[pos + 2] = (unsigned char)((disp_val>>16)&0xff);
+        final_code[pos + 3] = (unsigned char)((disp_val>>24)&0xff);
+    }
 
-     unsigned long filesz = fi + total_msg_bytes;
+    unsigned long filesz = fi + total_msg_bytes;
 
-     unsigned char e_ident[16] = {0x7f,'E','L','F', 2 /*ELFCLASS64*/, 1 /*LE*/, 1 /*EV_CURRENT*/, 0};
-     fwrite(e_ident, 1, 16, f);
-     write_u16(f, 2); // e_type ET_EXEC
-     write_u16(f, 0x3e); // e_machine EM_X86_64
-     write_u32(f, 1); // e_version
-     write_u64(f, entry); // e_entry
-     write_u64(f, phoff); // e_phoff
-     write_u64(f, 0); // e_shoff
-     write_u32(f, 0); // e_flags
-     write_u16(f, 64); // e_ehsize
-     write_u16(f, 56); // e_phentsize
-     write_u16(f, 1);  // e_phnum
-     write_u16(f, 0);  // e_shentsize
-     write_u16(f, 0);  // e_shnum
-     write_u16(f, 0);  // e_shstrndx
+    unsigned char e_ident[16] = {0x7f,'E','L','F', 2 /*ELFCLASS64*/, 1 /*LE*/, 1 /*EV_CURRENT*/, 0};
+    fwrite(e_ident, 1, 16, f);
+    write_u16(f, 2); // e_type ET_EXEC
+    write_u16(f, 0x3e); // e_machine EM_X86_64
+    write_u32(f, 1); // e_version
+    write_u64(f, entry); // e_entry
+    write_u64(f, phoff); // e_phoff
+    write_u64(f, 0); // e_shoff
+    write_u32(f, 0); // e_flags
+    write_u16(f, 64); // e_ehsize
+    write_u16(f, 56); // e_phentsize
+    write_u16(f, 1);  // e_phnum
+    write_u16(f, 0);  // e_shentsize
+    write_u16(f, 0);  // e_shnum
+    write_u16(f, 0);  // e_shstrndx
 
-     // Program header (PT_LOAD)
-     write_u32(f, 1); // p_type PT_LOAD
-     write_u32(f, 5); // p_flags PF_R + PF_X
-     write_u64(f, text_off); // p_offset
-     write_u64(f, entry);    // p_vaddr
-     write_u64(f, entry);    // p_paddr
-     write_u64(f, filesz);   // p_filesz
-     write_u64(f, filesz);   // p_memsz
-     write_u64(f, 0x1000); // p_align
+    // Program header (PT_LOAD)
+    write_u32(f, 1); // p_type PT_LOAD
+    write_u32(f, 5); // p_flags PF_R + PF_X
+    write_u64(f, text_off); // p_offset
+    write_u64(f, entry);    // p_vaddr
+    write_u64(f, entry);    // p_paddr
+    write_u64(f, filesz);   // p_filesz
+    write_u64(f, filesz);   // p_memsz
+    write_u64(f, 0x1000); // p_align
 
-     // Pad to text_off
-     long cur = ftell(f);
-     while (cur < (long)text_off) { fputc(0, f); cur++; }
+    // Pad to text_off
+    long cur = ftell(f);
+    while (cur < (long)text_off) { fputc(0, f); cur++; }
 
-     // Write code
-     fwrite(final_code, 1, fi, f);
-     // Write messages concatenated
-     for (int i = 0; i < n_msgs; ++i) {
-          fwrite(msgs[i], 1, msg_lens[i], f);
-     }
+    // Write code
+    fwrite(final_code, 1, fi, f);
+    // Write messages concatenated
+    for (int i = 0; i < n_msgs; ++i) {
+        fwrite(msgs[i], 1, msg_lens[i], f);
+    }
 
-     free(disp_positions);
-     free(next_instr_offsets);
-     free(msg_offsets_within_messages);
+    free(disp_positions);
+    free(next_instr_offsets);
+    free(msg_offsets_within_messages);
 
     fclose(f);
     return 0;
+}
+
+/* --- lightweight parser (line-oriented) ---
+   This builds a simple AST with top-level constructs (functions, destruct, enums)
+   and function bodies as a list of statement strings. It's sufficient as a
+   first step before implementing a full expression parser and native codegen.
+*/
+
+typedef enum { ST_PERIC, ST_ERIC_DECL, ST_ASSIGN, ST_RETURN, ST_OTHER, ST_FOR, ST_WHILE, ST_IF } StmtKind;
+
+typedef struct Stmt {
+    StmtKind kind;
+    char *raw; // original line trimmed
+    struct Stmt *next;
+    struct Stmt *body; // nested block
+    struct Stmt *else_body; // for if/else
+    char *cond; // condition or extra data (e.g., range args)
+    char *it_name; // iterator name for for-loops
+    int indent; // number of leading spaces (for block detection)
+} Stmt;
+
+typedef struct Function {
+    char *name;
+    char *ret_type;
+    char *params; // raw param string for now
+    Stmt *body;
+    struct Function *next;
+} Function;
+
+typedef struct Program {
+    Function *functions;
+} Program;
+
+/* Symbol table for simple compile-time evaluation */
+typedef enum { SYM_INT, SYM_STR } SymType;
+typedef struct Sym {
+    char *name;
+    SymType type;
+    long long ival;
+    char *sval;
+    struct Sym *next;
+} Sym;
+
+static Sym *sym_table = NULL;
+
+static void sym_set_int(const char *name, long long v) {
+    Sym *p = sym_table;
+    while (p) { if (strcmp(p->name, name) == 0) break; p = p->next; }
+    if (!p) { p = malloc(sizeof(Sym)); p->name = my_strdup(name); p->next = sym_table; sym_table = p; }
+    if (p->type == SYM_STR) { free(p->sval); p->sval = NULL; }
+    p->type = SYM_INT; p->ival = v;
+}
+static void sym_set_str(const char *name, const char *s) {
+    Sym *p = sym_table;
+    while (p) { if (strcmp(p->name, name) == 0) break; p = p->next; }
+    if (!p) { p = malloc(sizeof(Sym)); p->name = my_strdup(name); p->next = sym_table; sym_table = p; }
+    if (p->type == SYM_STR && p->sval) free(p->sval);
+    p->type = SYM_STR; p->sval = my_strdup(s);
+}
+static Sym *sym_get(const char *name) {
+    Sym *p = sym_table; while (p) { if (strcmp(p->name, name) == 0) return p; p = p->next; } return NULL;
+}
+static void sym_clear(void) {
+    Sym *p = sym_table; while (p) { Sym *n = p->next; free(p->name); if (p->type==SYM_STR && p->sval) free(p->sval); free(p); p = n; } sym_table = NULL;
+}
+
+/* Simple recursive-descent expression evaluator for integers */
+typedef struct { const char *s; int pos; } ExprState;
+static void skip_ws(ExprState *e) { while (e->s[e->pos] == ' ' || e->s[e->pos] == '\t') e->pos++; }
+static long long parse_expr(ExprState *e);
+static long long parse_rel(ExprState *e);
+static long long parse_factor(ExprState *e) {
+    skip_ws(e);
+    const char *s = e->s + e->pos;
+    if (s[0] == '(') { e->pos++; long long v = parse_rel(e); skip_ws(e); if (e->s[e->pos] == ')') e->pos++; return v; }
+    if ((s[0] >= '0' && s[0] <= '9') || (s[0] == '-' && s[1] >= '0' && s[1] <= '9')) {
+        char *end; long long v = strtoll(s, &end, 10); e->pos += (end - s); return v;
+    }
+    // identifier
+    int i = 0; while ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] == '_' ) || (s[i] >= '0' && s[i] <= '9')) i++;
+    if (i > 0) {
+        char name[128]; int n = i < 127 ? i : 127; memcpy(name, s, n); name[n] = '\0'; e->pos += i;
+        Sym *sym = sym_get(name);
+        if (sym && sym->type == SYM_INT) return sym->ival;
+        return 0; // default 0 if unknown
+    }
+    return 0;
+}
+static long long parse_term(ExprState *e) {
+    long long v = parse_factor(e);
+    for (;;) {
+        skip_ws(e);
+        char c = e->s[e->pos];
+        if (c == '*') { e->pos++; long long r = parse_factor(e); v = v * r; }
+        else if (c == '/') { e->pos++; long long r = parse_factor(e); if (r!=0) v = v / r; else v = 0; }
+        else break;
+    }
+    return v;
+}
+static long long parse_expr(ExprState *e) {
+    long long v = parse_term(e);
+    for (;;) {
+        skip_ws(e);
+        char c = e->s[e->pos];
+        if (c == '+') { e->pos++; long long r = parse_term(e); v = v + r; }
+        else if (c == '-') { e->pos++; long long r = parse_term(e); v = v - r; }
+        else break;
+    }
+    return v;
+
+}
+
+/* relational operators: >, <, >=, <=, ==, != */
+static long long parse_rel(ExprState *e) {
+    long long left = parse_expr(e);
+    for (;;) {
+        skip_ws(e);
+        char a = e->s[e->pos]; char b = e->s[e->pos+1];
+        if (a == '>' && b == '=') { e->pos += 2; long long right = parse_expr(e); left = (left >= right); }
+        else if (a == '<' && b == '=') { e->pos += 2; long long right = parse_expr(e); left = (left <= right); }
+        else if (a == '=' && b == '=') { e->pos += 2; long long right = parse_expr(e); left = (left == right); }
+        else if (a == '!' && b == '=') { e->pos += 2; long long right = parse_expr(e); left = (left != right); }
+        else if (a == '>') { e->pos += 1; long long right = parse_expr(e); left = (left > right); }
+        else if (a == '<') { e->pos += 1; long long right = parse_expr(e); left = (left < right); }
+        else break;
+    }
+    return left;
+
+}
+
+static long long eval_int_expr(const char *expr) {
+    ExprState e = { expr, 0 };
+    return parse_rel(&e);
+}
+
+/* Evaluate a placeholder: if it's a plain identifier and maps to string, return string;
+   otherwise evaluate as integer and return string form. */
+static char *eval_placeholder(const char *inside) {
+    // trim
+    while (*inside == ' ' || *inside == '\t') inside++;
+    int len = strlen(inside);
+    while (len>0 && (inside[len-1]==' '||inside[len-1]=='\t')) len--;
+    char tmp[256]; if (len >= (int)sizeof(tmp)) len = sizeof(tmp)-1; memcpy(tmp, inside, len); tmp[len] = '\0';
+    // check if plain identifier
+    int allid = 1; for (int i = 0; i < len; ++i) { char c=tmp[i]; if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_'||(c>='0'&&c<='9'))) { allid=0; break; } }
+    if (allid) {
+        Sym *s = sym_get(tmp);
+        if (s) {
+            if (s->type == SYM_STR) return my_strdup(s->sval);
+            else { char buf[64]; snprintf(buf, sizeof(buf), "%lld", s->ival); return my_strdup(buf); }
+        }
+    }
+    // else evaluate as int expression
+    long long v = eval_int_expr(tmp);
+    char buf[64]; snprintf(buf, sizeof(buf), "%lld", v); return my_strdup(buf);
+}
+
+/* Execute function statements at compile-time to populate msgs and return code */
+static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p, int *retcode_p);
+
+static int execute_function_compiletime(Function *f, char ***out_msgs, unsigned int **out_lens, int *out_n_msgs, int *out_ret) {
+    sym_clear();
+    int max_msgs = 8; char **msgs = malloc(sizeof(char*) * max_msgs); unsigned int *msg_lens = malloc(sizeof(unsigned int) * max_msgs); int n_msgs = 0; int retcode = 0;
+
+    // execute top-level body
+    exec_stmt_list(f->body, &msgs, &msg_lens, &n_msgs, &max_msgs, &retcode);
+
+    *out_msgs = msgs; *out_lens = msg_lens; *out_n_msgs = n_msgs; *out_ret = retcode;
+    return 0;
+}
+
+static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p, int *retcode_p) {
+    Stmt *s = stlist;
+    while (s) {
+        if (s->kind == ST_ERIC_DECL) {
+            const char *p = s->raw + 5; while (*p == ' ') p++; const char *eq = strchr(p, '=');
+            if (eq) {
+                const char *name_end = eq; while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; char name[128]; if (namelen>=127) namelen=127; memcpy(name, p, namelen); name[namelen]='\0'; const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++; if (rhs[0] == '"') { const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val); } else { long long v = eval_int_expr(rhs); sym_set_int(name, v); }
+            } else {
+                const char *arrow = strstr(p, "->"); const char *name_end = arrow ? arrow : p + strlen(p); while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; char name[128]; if (namelen>=127) namelen=127; memcpy(name,p,namelen); name[namelen]='\0'; sym_set_int(name, 0);
+            }
+        } else if (s->kind == ST_ASSIGN) {
+            const char *p = s->raw; const char *eq = strchr(p, '='); if (eq) { const char *name_end = eq; while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; while (*p==' '||*p=='\t') p++; char name[128]; if (namelen>=127) namelen=127; memcpy(name,p,namelen); name[namelen]='\0'; const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++; if (rhs[0] == '"') { const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val); } else { long long v = eval_int_expr(rhs); sym_set_int(name, v); } }
+        } else if (s->kind == ST_PERIC) {
+            const char *p = strstr(s->raw, "peric("); if (!p) { s = s->next; continue; } const char *q = strchr(p, '"'); if (!q) { s = s->next; continue; } q++; const char *r = strchr(q, '"'); if (!r) { s = s->next; continue; } size_t len = r - q; char *tmpl = malloc(len+1); memcpy(tmpl, q, len); tmpl[len] = '\0'; char out[1024]; out[0] = '\0'; const char *cur = tmpl; while (*cur) { const char *obr = strchr(cur, '{'); if (!obr) { strncat(out, cur, sizeof(out)-strlen(out)-1); break; } strncat(out, cur, obr - cur); const char *cbr = strchr(obr, '}'); if (!cbr) { strncat(out, obr, sizeof(out)-strlen(out)-1); break; } int ilen = cbr - (obr+1); char inner[256]; if (ilen >= (int)sizeof(inner)) ilen = sizeof(inner)-1; memcpy(inner, obr+1, ilen); inner[ilen]='\0'; char *evaled = eval_placeholder(inner); strncat(out, evaled, sizeof(out)-strlen(out)-1); free(evaled); cur = cbr + 1; }
+            /* ensure newline terminated messages for better console output */
+            size_t olen = strlen(out);
+            char *withn = malloc(olen + 2);
+            memcpy(withn, out, olen);
+            withn[olen] = '\n';
+            withn[olen + 1] = '\0';
+            if (*n_msgs_p >= *max_msgs_p) { *max_msgs_p *= 2; *msgs_p = realloc(*msgs_p, sizeof(char*)*(*max_msgs_p)); *msg_lens_p = realloc(*msg_lens_p, sizeof(unsigned int)*(*max_msgs_p)); }
+            (*msgs_p)[*n_msgs_p] = withn;
+            (*msg_lens_p)[*n_msgs_p] = (unsigned int)strlen(withn);
+            (*n_msgs_p)++;
+            free(tmpl);
+        } else if (s->kind == ST_RETURN) { const char *p = s->raw + strlen("deschodt"); while (*p==' '||*p=='\t') p++; if (*p) { *retcode_p = atoi(p); }
+            printf("DEBUG: ST_RETURN encountered raw='%s' ret=%d\n", s->raw, *retcode_p);
+            return 1; }
+        else if (s->kind == ST_FOR) {
+            if (!s->cond || !s->it_name) { s = s->next; continue; }
+            char *cpy = my_strdup(s->cond); char *comma = strchr(cpy, ','); long long start = 0, end = 0; if (comma) { *comma='\0'; start = eval_int_expr(cpy); end = eval_int_expr(comma+1); } else { start = eval_int_expr(cpy); end = start; }
+            for (long long ii = start; ii < end; ++ii) {
+                sym_set_int(s->it_name, ii);
+                if (exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p)) { free(cpy); return 1; }
+            }
+            free(cpy);
+        } else if (s->kind == ST_WHILE) {
+            if (!s->cond) { s = s->next; continue; }
+            int safety = 0;
+            while (1) {
+                long long v = eval_int_expr(s->cond);
+                if (!v) break;
+                if (exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p)) return 1;
+                if (++safety > 10000) break;
+            }
+        } else if (s->kind == ST_IF) {
+            if (!s->cond) { s = s->next; continue; }
+            /* debug: show condition and any referenced symbol before evaluation */
+            printf("DEBUG: IF cond='%s'\n", s->cond);
+            /* try to extract a simple identifier from the condition for debugging */
+            char idtmp[128] = {0}; const char *q = s->cond; while (*q && !(((*q>='a'&&*q<='z')||(*q>='A'&&*q<='Z')||(*q=='_')))) q++; int ii = 0; while (*q && (((*q>='a'&&*q<='z')||(*q>='A'&&*q<='Z')||(*q>='0'&&*q<='9')||(*q=='_')) ) && ii < (int)sizeof(idtmp)-1) { idtmp[ii++] = *q++; } idtmp[ii] = '\0';
+            if (idtmp[0]) {
+                Sym *sx = sym_get(idtmp);
+                if (sx) {
+                    if (sx->type == SYM_INT) printf("DEBUG: symbol %s = %lld (int)\n", idtmp, sx->ival);
+                    else printf("DEBUG: symbol %s = '%s' (str)\n", idtmp, sx->sval ? sx->sval : "(null)");
+                } else {
+                    printf("DEBUG: symbol %s not found\n", idtmp);
+                }
+            }
+            long long v = eval_int_expr(s->cond);
+            printf("DEBUG: cond '%s' => %lld\n", s->cond, v);
+            if (v) { if (exec_stmt_list(s->body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p)) return 1; }
+            else { if (exec_stmt_list(s->else_body, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p, retcode_p)) return 1; }
+        }
+        s = s->next;
+    }
+    return 0;
+}
+
+static char *trim(char *s) {
+    while (*s == ' ' || *s == '\t') ++s;
+    char *end = s + strlen(s) - 1;
+    while (end > s && (*end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) { *end = '\0'; --end; }
+    return s;
+}
+
+static Stmt *make_stmt(StmtKind k, const char *rawline) {
+    Stmt *s = malloc(sizeof(Stmt));
+    s->kind = k;
+    s->raw = my_strdup(rawline);
+    s->next = NULL;
+    s->body = NULL;
+    s->else_body = NULL;
+    s->cond = NULL;
+    s->it_name = NULL;
+    s->indent = 0;
+    return s;
+}
+
+static Stmt *make_stmt_indent(StmtKind k, const char *rawline, int indent) {
+    Stmt *s = make_stmt(k, rawline);
+    if (s) s->indent = indent;
+    return s;
+}
+
+static void append_stmt(Stmt **head, Stmt *s) {
+    if (!*head) { *head = s; return; }
+    Stmt *p = *head; while (p->next) p = p->next; p->next = s;
+}
+
+static Program *parse_program(const char *src) {
+    Program *prog = calloc(1, sizeof(Program));
+    char *copy = my_strdup(src);
+    char *line = strtok(copy, "\n");
+    Function *curf = NULL;
+    // We'll simulate a stack of indentation levels by capturing leading spaces
+    while (line) {
+        char *rawline = line;
+        // count leading spaces
+        int indent = 0; while (rawline[indent] == ' ' || rawline[indent] == '\t') indent++;
+        char *trimmed = trim(line);
+        if (trimmed[0] == '\0') { line = strtok(NULL, "\n"); continue; }
+        // top-level function
+        if (strncmp(trimmed, "Deschodt ", 9) == 0) {
+            // parse header: Deschodt Name(params) -> ret
+            char namebuf[128] = {0};
+            char paramsbuf[256] = {0};
+            char retdat[64] = {0};
+            const char *p = trimmed + 9;
+            // extract name up to '('
+            const char *paren = strchr(p, '(');
+            if (!paren) { line = strtok(NULL, "\n"); continue; }
+            size_t nlen = paren - p;
+            if (nlen >= sizeof(namebuf)) nlen = sizeof(namebuf)-1;
+            memcpy(namebuf, p, nlen);
+            // params
+            const char *close = strchr(paren, ')');
+            if (close && close > paren+1) {
+                size_t plen = close - (paren+1);
+                if (plen >= sizeof(paramsbuf)) plen = sizeof(paramsbuf)-1;
+                memcpy(paramsbuf, paren+1, plen);
+            }
+            const char *arr = strstr(close ? close : trimmed, "->");
+            if (arr) {
+                arr += 2;
+                while (*arr == ' ' || *arr == '\t') ++arr;
+                strncpy(retdat, arr, sizeof(retdat)-1);
+            }
+            Function *f = malloc(sizeof(Function));
+            f->name = my_strdup(namebuf);
+            f->params = my_strdup(paramsbuf);
+            f->ret_type = my_strdup(retdat);
+            f->body = NULL;
+            f->next = NULL;
+            // attach
+            if (!prog->functions) prog->functions = f; else {
+                Function *t = prog->functions; while (t->next) t = t->next; t->next = f;
+            }
+            curf = f;
+            // read following indented lines as body
+            char *peek = strtok(NULL, "\n");
+            while (peek) {
+                char *rawpeek = peek; int pindent = 0;
+                while (rawpeek[pindent] == ' ' || rawpeek[pindent] == '\t') pindent++;
+                char *tpeek = trim(peek);
+                if (tpeek[0] == '\0') { peek = strtok(NULL, "\n"); continue; }
+                // stop when indentation goes back to top-level
+                if (pindent == 0) break;
+                // parse nested statements: for, while, if, peric, eric, assign, return
+                if (strncmp(tpeek, "peric(", 6) == 0) append_stmt(&curf->body, make_stmt_indent(ST_PERIC, tpeek, pindent));
+                else if (strncmp(tpeek, "eric ", 5) == 0) append_stmt(&curf->body, make_stmt_indent(ST_ERIC_DECL, tpeek, pindent));
+                else if (strncmp(tpeek, "deschodt", 8) == 0) append_stmt(&curf->body, make_stmt_indent(ST_RETURN, tpeek, pindent));
+                else if (strncmp(tpeek, "aer ", 4) == 0) {
+                    // format: aer i in range(0, 5):
+                    Stmt *st = make_stmt(ST_FOR, tpeek);
+                    // extract iterator name
+                    const char *inpos = strstr(tpeek, " in ");
+                    if (inpos) {
+                        int inlen = inpos - (tpeek + 4);
+                        char itn[64]; if (inlen>=63) inlen=63; memcpy(itn, tpeek+4, inlen); itn[inlen]='\0'; st->it_name = my_strdup(itn);
+                        // store range args in cond
+                        const char *rpos = strstr(inpos, "range("); if (rpos) { const char *open = strchr(rpos, '('); const char *close = strchr(rpos, ')'); if (open && close) { size_t clen = close-open-1; st->cond = malloc(clen+1); memcpy(st->cond, open+1, clen); st->cond[clen]='\0'; } }
+                    }
+                    st->indent = pindent;
+                    append_stmt(&curf->body, st);
+                    /* consume following indented lines as the for-body */
+                    char *inner = strtok(NULL, "\n");
+                    while (inner) {
+                        char *iraw = inner; int iindent = 0; while (iraw[iindent]==' '||iraw[iindent]=='\t') iindent++; char *tinner = trim(inner);
+                        if (tinner[0] == '\0') { inner = strtok(NULL, "\n"); continue; }
+                        if (iindent <= pindent) break; /* end of this block */
+                        /* recognize simple statements inside body */
+                        if (strncmp(tinner, "peric(", 6) == 0) append_stmt(&st->body, make_stmt_indent(ST_PERIC, tinner, iindent));
+                        else if (strncmp(tinner, "eric ", 5) == 0) append_stmt(&st->body, make_stmt_indent(ST_ERIC_DECL, tinner, iindent));
+                        else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
+                        else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
+                        else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                        inner = strtok(NULL, "\n");
+                    }
+                    /* resume outer parse from the line that ended the block */
+                    peek = inner; if (!peek) break;
+                    continue;
+                }
+                else if (strncmp(tpeek, "darius ", 7) == 0) {
+                    Stmt *st = make_stmt(ST_WHILE, tpeek);
+                    // capture condition inside parentheses
+                    const char *op = strchr(tpeek, '('); const char *cl = strchr(tpeek, ')'); if (op && cl && cl > op) { size_t clen = cl-op-1; st->cond = malloc(clen+1); memcpy(st->cond, op+1, clen); st->cond[clen]='\0'; }
+                    st->indent = pindent;
+                    append_stmt(&curf->body, st);
+                    /* consume following indented lines as the while-body */
+                    char *innerw = strtok(NULL, "\n");
+                    while (innerw) {
+                        char *iraw = innerw; int iindent = 0; while (iraw[iindent]==' '||iraw[iindent]=='\t') iindent++; char *tinner = trim(innerw);
+                        if (tinner[0] == '\0') { innerw = strtok(NULL, "\n"); continue; }
+                        if (iindent <= pindent) break;
+                        if (strncmp(tinner, "peric(", 6) == 0) append_stmt(&st->body, make_stmt_indent(ST_PERIC, tinner, iindent));
+                        else if (strncmp(tinner, "eric ", 5) == 0) append_stmt(&st->body, make_stmt_indent(ST_ERIC_DECL, tinner, iindent));
+                        else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
+                        else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
+                        else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                        innerw = strtok(NULL, "\n");
+                    }
+                    peek = innerw; if (!peek) break;
+                    continue;
+                }
+                else if (strncmp(tpeek, "erif ", 5) == 0) {
+                    Stmt *st = make_stmt(ST_IF, tpeek);
+                    const char *op = strchr(tpeek, '('); const char *cl = strchr(tpeek, ')'); if (op && cl && cl > op) { size_t clen = cl-op-1; st->cond = malloc(clen+1); memcpy(st->cond, op+1, clen); st->cond[clen]='\0'; }
+                    st->indent = pindent;
+                    append_stmt(&curf->body, st);
+                    /* consume following indented lines as the if-body */
+                    char *inneri = strtok(NULL, "\n");
+                    while (inneri) {
+                        char *iraw = inneri; int iindent = 0; while (iraw[iindent]==' '||iraw[iindent]=='\t') iindent++; char *tinner = trim(inneri);
+                        if (tinner[0] == '\0') { inneri = strtok(NULL, "\n"); continue; }
+                        if (iindent <= pindent) break;
+                        if (strncmp(tinner, "peric(", 6) == 0) append_stmt(&st->body, make_stmt_indent(ST_PERIC, tinner, iindent));
+                        else if (strncmp(tinner, "eric ", 5) == 0) append_stmt(&st->body, make_stmt_indent(ST_ERIC_DECL, tinner, iindent));
+                        else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
+                        else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
+                        else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                        inneri = strtok(NULL, "\n");
+                    }
+                    peek = inneri; if (!peek) break; 
+                    continue;
+                }
+                else if (strstr(tpeek, "deschelse") == tpeek) {
+                    printf("processing deschelse\n");
+                    // attach else to last if
+                    // find last statement in curf->body
+                    Stmt *last = curf->body; while (last && last->next) last = last->next; if (last && last->kind == ST_IF) {
+                        // consume following indented lines as else body
+                        char *elsepeek = strtok(NULL, "\n");
+                        while (elsepeek) {
+                            char *rt = elsepeek; int rind = 0; while (rt[rind]==' '||rt[rind]=='\t') rind++; char *ttr = trim(elsepeek);
+                            if (ttr[0] == '\0') { elsepeek = strtok(NULL, "\n"); continue; }
+                                /* stop else-body when indentation returns to or is less than the if line */
+                                if (rind <= pindent) break;
+                                if (strncmp(ttr, "peric(", 6) == 0) { printf("appending to else_body: %s\n", ttr); append_stmt(&last->else_body, make_stmt(ST_PERIC, ttr)); }
+                                else if (strncmp(ttr, "eric ", 5) == 0) append_stmt(&last->else_body, make_stmt(ST_ERIC_DECL, ttr));
+                                else if (strncmp(ttr, "deschodt", 8) == 0) append_stmt(&last->else_body, make_stmt(ST_RETURN, ttr));
+                                else if (strchr(ttr, '=') != NULL) append_stmt(&last->else_body, make_stmt(ST_ASSIGN, ttr));
+                                else append_stmt(&last->else_body, make_stmt(ST_OTHER, ttr));
+                            elsepeek = strtok(NULL, "\n");
+                        }
+                        // resume parse from elsepeek
+                        peek = elsepeek; line = peek; continue;
+                    }
+                }
+                else if (strchr(tpeek, '=') != NULL) append_stmt(&curf->body, make_stmt(ST_ASSIGN, tpeek));
+                else append_stmt(&curf->body, make_stmt(ST_OTHER, tpeek));
+                peek = strtok(NULL, "\n");
+            }
+            // continue from peek (which might be top-level) - strtok state already advanced, so set line accordingly
+            line = peek;
+            continue;
+        }
+        // other top-level constructs ignored for now
+        line = strtok(NULL, "\n");
+    }
+    free(copy);
+    return prog;
+}
+
+static void free_program(Program *p) {
+    if (!p) return;
+    Function *f = p->functions;
+    while (f) {
+        Function *nf = f->next;
+        free(f->name); free(f->params); free(f->ret_type);
+        Stmt *s = f->body;
+        while (s) { Stmt *ns = s->next; free(s->raw); free(s); s = ns; }
+        free(f);
+        f = nf;
+    }
+    free(p);
+}
+
+static void print_program(Program *p) {
+    if (!p) return;
+    Function *f = p->functions;
+    while (f) {
+        printf("Function %s(%s) -> %s\n", f->name, f->params, f->ret_type);
+        Stmt *s = f->body;
+        while (s) {
+            const char *kname = "OTHER";
+            if (s->kind == ST_PERIC) kname = "PERIC";
+            if (s->kind == ST_ERIC_DECL) kname = "ERIC";
+            if (s->kind == ST_ASSIGN) kname = "ASSIGN";
+            if (s->kind == ST_RETURN) kname = "RETURN";
+            if (s->kind == ST_FOR) kname = "FOR";
+            if (s->kind == ST_WHILE) kname = "WHILE";
+            if (s->kind == ST_IF) kname = "IF";
+            printf("  [%s] %s\n", kname, s->raw);
+            if (s->kind == ST_IF) {
+                Stmt *b = s->body;
+                while (b) { printf("    (if-body) %s\n", b->raw); b = b->next; }
+                Stmt *e = s->else_body;
+                while (e) { printf("    (else-body) %s\n", e->raw); e = e->next; }
+            } else if (s->kind == ST_FOR || s->kind == ST_WHILE) {
+                Stmt *b = s->body;
+                while (b) { printf("    (body) %s\n", b->raw); b = b->next; }
+            }
+            s = s->next;
+        }
+        f = f->next;
+    }
 }
 
 int main(int argc, char **argv) {
@@ -211,46 +701,48 @@ int main(int argc, char **argv) {
     buf[sz] = '\0';
     fclose(s);
 
-    // Collect all peric("...") messages
-    int max_msgs = 16;
-    char **msgs = malloc(sizeof(char*) * max_msgs);
-    unsigned int *msg_lens = malloc(sizeof(unsigned int) * max_msgs);
-    int n_msgs = 0;
-    const char *p = buf;
-    while ((p = strstr(p, "peric(")) != NULL) {
-        const char *q = strchr(p, '"');
-        if (!q) break; q++;
-        const char *rpos = strchr(q, '"');
-        if (!rpos) break;
-        size_t len = rpos - q;
-        char *m = malloc(len + 1);
-        memcpy(m, q, len);
-        m[len] = '\0';
-        if (n_msgs >= max_msgs) {
-            max_msgs *= 2;
-            msgs = realloc(msgs, sizeof(char*) * max_msgs);
-            msg_lens = realloc(msg_lens, sizeof(unsigned int) * max_msgs);
+    // Remove 'desnote' comment lines into a filtered buffer
+    char *filtered = malloc(sz + 1);
+    filtered[0] = '\0';
+    char *copy2 = my_strdup(buf);
+    char *ln = strtok(copy2, "\n");
+    while (ln) {
+        char *t = trim(ln);
+        if (strncmp(t, "desnote", 7) != 0) {
+            strcat(filtered, ln);
+            strcat(filtered, "\n");
         }
-        msgs[n_msgs] = m;
-        msg_lens[n_msgs] = (unsigned int)len;
-        n_msgs++;
-        p = rpos + 1;
+        ln = strtok(NULL, "\n");
     }
-    if (n_msgs == 0) {
-        msgs[0] = my_strdup("Hello from TheShowLang!\n");
-        msg_lens[0] = (unsigned int)strlen(msgs[0]);
-        n_msgs = 1;
-    }
-    int ret = extract_deschodt_int(buf, 0);
 
-    int r = emit_elf(out_path, (const char**)msgs, msg_lens, n_msgs, ret);
+    // Parse program and execute the main function at compile-time to collect messages
+    Program *prog = parse_program(filtered);
+    // debug: print parsed AST
+    print_program(prog);
+    Function *f = prog->functions;
+    Function *mainf = NULL;
+    while (f) { if (strcmp(f->name, "Eric") == 0) { mainf = f; break; } f = f->next; }
+    int r;
+    if (!mainf) {
+        fprintf(stderr, "No main function Deschodt Eric() found\n");
+        r = 1;
+    } else {
+        char **msgs2; unsigned int *msg_lens2; int n_msgs2; int ret2;
+        execute_function_compiletime(mainf, &msgs2, &msg_lens2, &n_msgs2, &ret2);
+        r = emit_elf(out_path, (const char**)msgs2, msg_lens2, n_msgs2, ret2);
+        if (r == 0) {
+            printf("Wrote %s (message=\"%s\", ret=%d)\n", out_path, msgs2[0], ret2);
+        }
+        for (int i = 0; i < n_msgs2; ++i) free(msgs2[i]); free(msgs2); free(msg_lens2);
+    }
+    free_program(prog);
     if (r != 0) {
         fprintf(stderr, "emit failed\n");
+        free(filtered);
+        free(copy2);
         return 1;
     }
-    printf("Wrote %s (message=\"%s\", ret=%d)\n", out_path, msgs[0], ret);
-    for (int i = 0; i < n_msgs; ++i) free(msgs[i]);
-    free(msgs);
-    free(msg_lens);
+    free(filtered);
+    free(copy2);
     return 0;
 }
