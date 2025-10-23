@@ -1,0 +1,16 @@
+Deschodt somme(tab -> int[], taille -> int) -> int
+    eric total = 0
+    aer i in range(0, taille):
+        total = total + tab[i]
+    deschodt total
+
+Deschodt Eric() -> int
+    eric valeurs -> int[4]
+    valeurs[0] = 4
+    valeurs[1] = 7
+    valeurs[2] = 2
+    valeurs[3] = 9
+
+    eric res = somme(valeurs, 4)
+    peric("Somme = {res}")
+    deschodt 0

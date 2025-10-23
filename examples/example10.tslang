@@ -1,0 +1,11 @@
+desconst PI = 3.1415
+
+desenum Jour:
+    Lundi
+    Mardi
+    Mercredi
+
+Deschodt Eric() -> int
+    eric j = Mardi
+    peric("PI = {PI}, Jour = {j}")
+    deschodt 0

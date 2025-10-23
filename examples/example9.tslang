@@ -1,0 +1,7 @@
+Deschodt addition(a -> int, b -> int) -> int
+    deschodt a + b
+
+Deschodt Eric() -> int
+    eric result = addition(5, 7)
+    peric("Résultat : {result}")
+    deschodt 0

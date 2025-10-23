@@ -1,0 +1,12 @@
+Deschodt Eric() -> int
+    peric("Boucle aer :")
+    aer i in range(0, 5):
+        peric("i = {i}")
+
+    peric("Boucle darius :")
+    eric x = 0
+    darius (x < 3):
+        peric("x = {x}")
+        x = x + 1
+
+    deschodt 0

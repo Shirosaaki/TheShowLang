@@ -1,0 +1,7 @@
+Deschodt Eric() -> int
+    eric x -> int
+    eric y = 10
+    eric z = x + y
+
+    peric("x = {x}, y = {y}, z = {z}")
+    deschodt 0

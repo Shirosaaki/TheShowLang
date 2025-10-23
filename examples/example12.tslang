@@ -1,0 +1,10 @@
+Deschodt factoriel(n -> int) -> int
+    erif (n <= 1):
+        deschodt 1
+    deschelse:
+        deschodt n * factoriel(n - 1)
+
+Deschodt Eric() -> int
+    eric val = 5
+    peric("factoriel({val}) = {factoriel(val)}")
+    deschodt 0

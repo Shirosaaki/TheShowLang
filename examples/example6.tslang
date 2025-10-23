@@ -1,0 +1,12 @@
+Deschodt Eric() -> int
+    eric nums -> int[5]
+    nums[0] = 1
+    nums[1] = 2
+    nums[2] = 3
+    nums[3] = 4
+    nums[4] = 5
+
+    aer i in range(0, 5):
+        peric("nums[{i}] = {nums[i]}")
+
+    deschodt 0

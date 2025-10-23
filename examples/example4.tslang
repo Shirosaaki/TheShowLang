@@ -1,0 +1,9 @@
+Deschodt Eric() -> int
+    eric age = 20
+
+    erif (age >= 18):
+        peric("Majeur")
+    deschelse:
+        peric("Mineur")
+
+    deschodt 0
