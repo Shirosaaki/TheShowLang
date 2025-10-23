@@ -1,0 +1,5 @@
+Deschodt my_strlen(s -> char *) -> int
+    eric len = 0
+    darius (s[len] != '\0') 
+        len = len + 1
+    deschodt len

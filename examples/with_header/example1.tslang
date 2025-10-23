@@ -1,0 +1,7 @@
+johnsenat example1.hlang
+
+Deschodt Eric() -> int
+    char *str = "Hello, world!"
+    eric length = my_strlen(str)
+    peric("Length of the string is: {length}")
+    deschodt 0
