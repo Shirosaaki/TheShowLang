@@ -265,16 +265,42 @@ static long long parse_rel(ExprState *e);
 static long long parse_factor(ExprState *e) {
     skip_ws(e);
     const char *s = e->s + e->pos;
-    if (s[0] == '(') { e->pos++; long long v = parse_rel(e); skip_ws(e); if (e->s[e->pos] == ')') e->pos++; return v; }
+    if (s[0] == '(') {
+        e->pos++;
+        long long v = parse_rel(e);
+        skip_ws(e);
+        if (e->s[e->pos] == ')') e->pos++;
+        return v;
+    }
     if ((s[0] >= '0' && s[0] <= '9') || (s[0] == '-' && s[1] >= '0' && s[1] <= '9')) {
         char *end; long long v = strtoll(s, &end, 10); e->pos += (end - s); return v;
     }
-    // identifier
-    int i = 0; while ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] == '_' ) || (s[i] >= '0' && s[i] <= '9')) i++;
+    // identifier (allow dots for fields)
+    int i = 0; while ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] == '_' ) || (s[i] >= '0' && s[i] <= '9') || (s[i]=='.')) i++;
     if (i > 0) {
-        char name[128]; int n = i < 127 ? i : 127; memcpy(name, s, n); name[n] = '\0'; e->pos += i;
+        char name[256]; int n = i < (int)sizeof(name)-1 ? i : (int)sizeof(name)-1; memcpy(name, s, n); name[n] = '\0'; e->pos += i;
+        skip_ws(e);
+        // array indexing
+        if (e->s[e->pos] == '[') {
+            e->pos++; // skip '['
+            long long idx = parse_expr(e);
+            skip_ws(e);
+            if (e->s[e->pos] == ']') e->pos++;
+            char key[512]; snprintf(key, sizeof(key), "%s[%lld]", name, idx);
+            Sym *sym = sym_get(key);
+            if (sym && sym->type == SYM_INT) {
+                printf("DEBUG: parse_factor lookup '%s' -> %lld\n", key, sym->ival);
+                return sym->ival;
+            }
+            printf("DEBUG: parse_factor lookup '%s' -> (not found)\n", key);
+            return 0;
+        }
         Sym *sym = sym_get(name);
-        if (sym && sym->type == SYM_INT) return sym->ival;
+        if (sym && sym->type == SYM_INT) {
+            printf("DEBUG: parse_factor lookup '%s' -> %lld\n", name, sym->ival);
+            return sym->ival;
+        }
+        printf("DEBUG: parse_factor lookup '%s' -> (not found)\n", name);
         return 0; // default 0 if unknown
     }
     return 0;
@@ -335,7 +361,7 @@ static char *eval_placeholder(const char *inside) {
     while (len>0 && (inside[len-1]==' '||inside[len-1]=='\t')) len--;
     char tmp[256]; if (len >= (int)sizeof(tmp)) len = sizeof(tmp)-1; memcpy(tmp, inside, len); tmp[len] = '\0';
     // check if plain identifier
-    int allid = 1; for (int i = 0; i < len; ++i) { char c=tmp[i]; if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_'||(c>='0'&&c<='9'))) { allid=0; break; } }
+    int allid = 1; for (int i = 0; i < len; ++i) { char c=tmp[i]; if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_'||(c>='0'&&c<='9')||(c=='.'))) { allid=0; break; } }
     if (allid) {
         Sym *s = sym_get(tmp);
         if (s) {
@@ -370,14 +396,45 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
             if (eq) {
                 const char *name_end = eq; while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; char name[128]; if (namelen>=127) namelen=127; memcpy(name, p, namelen); name[namelen]='\0'; const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++; if (rhs[0] == '"') { const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val); } else { long long v = eval_int_expr(rhs); sym_set_int(name, v); }
             } else {
-                const char *arrow = strstr(p, "->"); const char *name_end = arrow ? arrow : p + strlen(p); while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; char name[128]; if (namelen>=127) namelen=127; memcpy(name,p,namelen); name[namelen]='\0'; sym_set_int(name, 0);
+                    const char *arrow = strstr(p, "->"); const char *name_end = arrow ? arrow : p + strlen(p); while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; char name[128]; if (namelen>=127) namelen=127; memcpy(name,p,namelen); name[namelen]='\0';
+                    // handle array type like int[5]
+                    if (arrow) {
+                        const char *typ = arrow + 2; while (*typ==' '||*typ=='\t') typ++; // expect int[...] or similar
+                        // find '['
+                        const char *obr = strchr(typ, '[');
+                        const char *cbr = obr ? strchr(obr, ']') : NULL;
+                        if (obr && cbr && cbr > obr+1) {
+                            char numbuf[32]; int nlen = cbr - obr - 1; if (nlen >= (int)sizeof(numbuf)) nlen = sizeof(numbuf)-1; memcpy(numbuf, obr+1, nlen); numbuf[nlen] = '\0'; int count = atoi(numbuf);
+                            for (int ii = 0; ii < count; ++ii) { char key[256]; snprintf(key, sizeof(key), "%s[%d]", name, ii); sym_set_int(key, 0); }
+                        } else {
+                            sym_set_int(name, 0);
+                        }
+                    } else {
+                        sym_set_int(name, 0);
+                    }
             }
         } else if (s->kind == ST_ASSIGN) {
-            const char *p = s->raw; const char *eq = strchr(p, '='); if (eq) { const char *name_end = eq; while (name_end > p && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - p; while (*p==' '||*p=='\t') p++; char name[128]; if (namelen>=127) namelen=127; memcpy(name,p,namelen); name[namelen]='\0'; const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++; if (rhs[0] == '"') { const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val); } else { long long v = eval_int_expr(rhs); sym_set_int(name, v); } }
+            const char *p = s->raw; const char *eq = strchr(p, '=');
+            if (eq) {
+                /* extract LHS cleanly: trim spaces and capture everything up to '=' */
+                const char *lhs_start = p; while (*lhs_start == ' '||*lhs_start=='\t') lhs_start++;
+                const char *lhs_end = eq; while (lhs_end > lhs_start && (*(lhs_end-1)==' '||*(lhs_end-1)=='\t')) lhs_end--;
+                int namelen = lhs_end - lhs_start;
+                char name[256]; if (namelen >= (int)sizeof(name)) namelen = sizeof(name)-1; memcpy(name, lhs_start, namelen); name[namelen] = '\0';
+                const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
+                if (rhs[0] == '"') {
+                    const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
+                } else {
+                    long long v = eval_int_expr(rhs);
+                    sym_set_int(name, v);
+                }
+            }
         } else if (s->kind == ST_PERIC) {
             const char *p = strstr(s->raw, "peric("); if (!p) { s = s->next; continue; } const char *q = strchr(p, '"'); if (!q) { s = s->next; continue; } q++; const char *r = strchr(q, '"'); if (!r) { s = s->next; continue; } size_t len = r - q; char *tmpl = malloc(len+1); memcpy(tmpl, q, len); tmpl[len] = '\0'; char out[1024]; out[0] = '\0'; const char *cur = tmpl; while (*cur) { const char *obr = strchr(cur, '{'); if (!obr) { strncat(out, cur, sizeof(out)-strlen(out)-1); break; } strncat(out, cur, obr - cur); const char *cbr = strchr(obr, '}'); if (!cbr) { strncat(out, obr, sizeof(out)-strlen(out)-1); break; } int ilen = cbr - (obr+1); char inner[256]; if (ilen >= (int)sizeof(inner)) ilen = sizeof(inner)-1; memcpy(inner, obr+1, ilen); inner[ilen]='\0'; char *evaled = eval_placeholder(inner); strncat(out, evaled, sizeof(out)-strlen(out)-1); free(evaled); cur = cbr + 1; }
             /* ensure newline terminated messages for better console output */
             size_t olen = strlen(out);
+            /* DEBUG: show the resolved peric string before storing */
+            printf("DEBUG: peric resolved='%s'\n", out);
             char *withn = malloc(olen + 2);
             memcpy(withn, out, olen);
             withn[olen] = '\n';
@@ -731,18 +788,11 @@ int main(int argc, char **argv) {
         execute_function_compiletime(mainf, &msgs2, &msg_lens2, &n_msgs2, &ret2);
         r = emit_elf(out_path, (const char**)msgs2, msg_lens2, n_msgs2, ret2);
         if (r == 0) {
-            printf("Wrote %s (message=\"%s\", ret=%d)\n", out_path, msgs2[0], ret2);
+            printf("Wrote %s\n", out_path);
         }
-        for (int i = 0; i < n_msgs2; ++i) free(msgs2[i]); free(msgs2); free(msg_lens2);
     }
     free_program(prog);
-    if (r != 0) {
-        fprintf(stderr, "emit failed\n");
-        free(filtered);
-        free(copy2);
-        return 1;
-    }
     free(filtered);
     free(copy2);
-    return 0;
+    return r;
 }
