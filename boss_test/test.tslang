@@ -1,0 +1,6 @@
+Deschodt Eric() -> int
+    eric src -> char *
+    src = "Hello "
+    src = src + "Hello, World!"
+    eric length = my_strlen(src)
+    peric("Length of the string {src} is: {length}")

@@ -1,13 +1,15 @@
+Deschodt my_strlen(s -> char *) -> int
+    eric len -> int
+    len = 0
+    darius (s[len] != '\0'):
+        len = len + 1
+    deschodt len
+
 Deschodt my_strcmp(s1 -> char *, s2 -> char *) -> int
-    eric i = 0
+    eric i -> int
+    i = 0
     darius (s1[i] != '\0' and s2[i] != '\0'):
-        darius (s1[i] != s2[i]):
+        erif (s1[i] != s2[i]):
             deschodt s1[i] - s2[i]
         i = i + 1
     deschodt s1[i] - s2[i]
-
-Deschodt my_strlen(s -> char *) -> int
-    eric len = 0
-    darius (s[len] != '\0') 
-        len = len + 1
-    deschodt len
