@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <strings.h>
 
 /* fallback strdup for strict compilation environments */
 static char *my_strdup(const char *s) {
@@ -28,6 +30,17 @@ static void write_u32(FILE *f, unsigned int v) {
 static void write_u16(FILE *f, unsigned short v) {
     putc(v & 0xff, f);
     putc((v>>8) & 0xff, f);
+}
+
+/* Error reporting helper: prints message to stderr and exits with code 1 */
+static void errorf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "Error: ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    exit(1);
 }
 
 // Very small parser: extract the first string inside peric("...")
@@ -289,7 +302,7 @@ static void sym_set_int(const char *name, long long v) {
         Sym *t = p->alias_target;
         t->type = SYM_INT; t->ival = v; return;
     }
-    if (p->type == SYM_STR) { free(p->sval); p->sval = NULL; }
+    if (p->type == SYM_STR) { if (p->sval) free(p->sval); p->sval = NULL; }
     p->type = SYM_INT; p->ival = v;
 }
 static void sym_set_str(const char *name, const char *s) {
@@ -304,7 +317,7 @@ static void sym_set_str(const char *name, const char *s) {
         t->type = SYM_STR; t->sval = dup; return;
     }
     if (p->type == SYM_STR && p->sval) free(p->sval);
-    p->type = SYM_STR; p->sval = my_strdup(s);
+    p->type = SYM_STR; p->sval = my_strdup(s ? s : "");
 }
 static Sym *sym_get(const char *name) {
     Sym *p = sym_table; while (p) { if (strcmp(p->name, name) == 0) return p; p = p->next; } return NULL;
@@ -330,6 +343,18 @@ static Sym *sym_resolve(Sym *p) {
 /* Find a symbol by name in an explicit table (used to locate caller symbols when creating aliases) */
 static Sym *sym_find_in_table(Sym *table, const char *name) {
     Sym *p = table; while (p) { if (strcmp(p->name, name) == 0) return p; p = p->next; } return NULL;
+}
+
+/* Return true if there exists any symbol whose name starts with prefix followed by '.'
+   used to allow assignments to 'param.field' when the struct-like base was declared. */
+static int sym_has_field_prefix(const char *prefix) {
+    size_t plen = strlen(prefix);
+    Sym *p = sym_table;
+    while (p) {
+        if (strncmp(p->name, prefix, plen) == 0 && p->name[plen] == '.') return 1;
+        p = p->next;
+    }
+    return 0;
 }
 
 /* Simple recursive-descent expression evaluator for integers */
@@ -393,6 +418,8 @@ static long long parse_factor(ExprState *e) {
                     long long res = call_function_compiletime(fn, argvals, argcnt, g_msgs_p, g_msg_lens_p, g_n_msgs_p, g_max_msgs_p);
                     return res;
                 }
+            } else {
+                errorf("Call to undefined function '%s' in expression '%s'", name, e->s);
             }
         }
         // array indexing
@@ -435,8 +462,7 @@ static long long parse_factor(ExprState *e) {
                 return res->ival;
             }
         }
-        printf("DEBUG: parse_factor lookup '%s' -> (not found)\n", name);
-        return 0; // default 0 if unknown
+        errorf("Undefined variable '%s' in expression '%s'", name, e->s);
     }
     // unary dereference: *name
     if (s[0] == '*') {
@@ -460,7 +486,7 @@ static long long parse_term(ExprState *e) {
         skip_ws(e);
         char c = e->s[e->pos];
         if (c == '*') { e->pos++; long long r = parse_factor(e); v = v * r; }
-        else if (c == '/') { e->pos++; long long r = parse_factor(e); if (r!=0) v = v / r; else v = 0; }
+        else if (c == '/') { e->pos++; long long r = parse_factor(e); if (r!=0) v = v / r; else errorf("Division by zero in expression '%s'", e->s); }
         else break;
     }
     return v;
@@ -604,23 +630,26 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                                     byref[argcnt] = 0;
                                                     argvals[argcnt] = 0;
                                                 } else {
-                                                    /* if the token is a plain identifier, record its name so callee can alias arrays */
-                                                    int is_id = 1; for (int _i=0; t[_i]; ++_i) { char _c = t[_i]; if (!((_c>='a'&&_c<='z')||(_c>='A'&&_c<='Z')||_c=='_'||(_c>='0'&&_c<='9')||_c=='.')) { is_id = 0; break; } }
+                                                    /* if the token is a plain identifier (starts with letter or _), record its name so callee can alias arrays */
+                                                    int is_id = 1;
+                                                    if (!((t[0] >= 'a' && t[0] <= 'z') || (t[0] >= 'A' && t[0] <= 'Z') || t[0] == '_')) is_id = 0;
+                                                    for (int _i = 1; t[_i]; ++_i) { char _c = t[_i]; if (!((_c>='a'&&_c<='z')||(_c>='A'&&_c<='Z')||_c=='_'||(_c>='0'&&_c<='9')||_c=='.')) { is_id = 0; break; } }
                                                     if (is_id) {
                                                         argnames[argcnt] = my_strdup(t);
+                                                        argvals[argcnt] = 0;
                                                     } else {
                                                         argnames[argcnt] = NULL;
+                                                        argvals[argcnt] = eval_int_expr(t);
                                                     }
                                                     byref[argcnt] = 0;
-                                                    argvals[argcnt] = eval_int_expr(t);
                                                 }
                                                 argcnt++; tok = strtok(NULL, ",");
                                             }
                                             free(cpy);
                             Function *fn = find_function(ftrim);
                             if (fn) {
-                                /* Special-case common builtins to avoid issues with user-space compile-time execution
-                                   (my_strlen, my_strcmp). These operate directly on symbol table entries. */
+                                          /* Special-case common builtins to avoid issues with user-space compile-time execution
+                                              (my_strlen, my_strcmp). These operate directly on symbol table entries. */
                                 if (strcmp(ftrim, "my_strlen") == 0 && argcnt >= 1) {
                                     long long cres = 0;
                                     if (argnames[0]) {
@@ -645,8 +674,7 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                     sym_set_int(name, cres);
                                 }
                             } else {
-                                long long v = eval_int_expr(rhs);
-                                sym_set_int(name, v);
+                                errorf("Call to undefined function '%s' in assignment to '%s'", ftrim, name);
                             }
                             for (int ii=0; ii<argcnt; ++ii) if (argnames[ii]) free(argnames[ii]);
                         } else {
@@ -695,6 +723,19 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 /* detect if LHS is a dereference like '*name' (first non-space is '*') */
                 int deref_flag = 0; for (int _i=0; raw_lhs[_i]; ++_i) { if (raw_lhs[_i] == ' ' || raw_lhs[_i] == '\t') continue; if (raw_lhs[_i] == '*') deref_flag = 1; break; }
                 char name[256]; extract_ident_from_lhs(raw_lhs, name, sizeof(name));
+                /* require prior declaration via 'eric' (ST_ERIC_DECL) before assigning to a variable */
+                Sym *lhs_sym = sym_get(name);
+                if (!lhs_sym) {
+                    /* allow assignment to dotted fields when the base was declared */
+                    if (strchr(name, '.')) {
+                        char base[256]; size_t pos = 0; while (pos < sizeof(base)-1 && name[pos] && name[pos] != '.') { base[pos] = name[pos]; pos++; } base[pos] = '\0';
+                        if (!sym_has_field_prefix(base)) {
+                            errorf("Assignment to undeclared variable '%s' (declare using 'eric <name> -> type')", name);
+                        }
+                    } else {
+                        errorf("Assignment to undeclared variable '%s' (declare using 'eric <name> -> type')", name);
+                    }
+                }
                 const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
                 /* If RHS contains a '+' outside quotes, evaluate as string concatenation (preserve strings) */
                 int plus_found_local = 0; const char *ppp = rhs; while (*ppp) {
@@ -756,11 +797,13 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                     } else if (aug_op_token == '/') {
                         long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
                         long long dv = eval_int_expr(rhs);
-                        if (dv != 0) sym_set_int(name, cur / dv); else sym_set_int(name, 0);
+                        if (dv != 0) sym_set_int(name, cur / dv);
+                        else errorf("Division by zero in augmented assignment on '%s'", name);
                     } else if (aug_op_token == '%') {
                         long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
                         long long dv = eval_int_expr(rhs);
-                        if (dv != 0) sym_set_int(name, cur % dv); else sym_set_int(name, 0);
+                        if (dv != 0) sym_set_int(name, cur % dv);
+                        else errorf("Modulo by zero in augmented assignment on '%s'", name);
                     }
                     goto ASSIGN_DONE_LABEL;
                 }
@@ -785,9 +828,11 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                     byref[argcnt] = 1;
                                     argvals[argcnt] = 0;
                                 } else {
-                                    int is_id = 1; for (int _i=0; t[_i]; ++_i) { char _c = t[_i]; if (!((_c>='a'&&_c<='z')||(_c>='A'&&_c<='Z')||_c=='_'||(_c>='0'&&_c<='9')||_c=='.')) { is_id = 0; break; } }
-                                    if (is_id) argnames[argcnt] = my_strdup(t); else argnames[argcnt] = NULL;
-                                    byref[argcnt] = 0; argvals[argcnt] = eval_int_expr(t);
+                                    int is_id = 1;
+                                    if (!((t[0] >= 'a' && t[0] <= 'z') || (t[0] >= 'A' && t[0] <= 'Z') || t[0] == '_')) is_id = 0;
+                                    for (int _i = 1; t[_i]; ++_i) { char _c = t[_i]; if (!((_c>='a'&&_c<='z')||(_c>='A'&&_c<='Z')||_c=='_'||(_c>='0'&&_c<='9')||_c=='.')) { is_id = 0; break; } }
+                                    if (is_id) { argnames[argcnt] = my_strdup(t); argvals[argcnt]=0; } else { argnames[argcnt] = NULL; argvals[argcnt] = eval_int_expr(t); }
+                                    byref[argcnt] = 0;
                                 }
                                 argcnt++; tok = strtok(NULL, ",");
                             }
@@ -924,7 +969,13 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                 char *t = trim(tok);
                                 if (t[0] == '&') { char *n = trim(t+1); argnames[argcnt] = my_strdup(n); byref[argcnt] = 1; argvals[argcnt]=0; }
                                 else if (t[0] == '"') { argnames[argcnt] = create_literal_string(t); byref[argcnt]=0; argvals[argcnt]=0; }
-                                else { argnames[argcnt]=NULL; byref[argcnt]=0; argvals[argcnt]=eval_int_expr(t); }
+                                else {
+                                    int is_id = 1;
+                                    if (!((t[0] >= 'a' && t[0] <= 'z') || (t[0] >= 'A' && t[0] <= 'Z') || t[0] == '_')) is_id = 0;
+                                    for (int _i = 1; t[_i]; ++_i) { char _c = t[_i]; if (!((_c>='a'&&_c<='z')||(_c>='A'&&_c<='Z')||_c=='_'||(_c>='0'&&_c<='9')||_c=='.')) { is_id = 0; break; } }
+                                    if (is_id) { argnames[argcnt] = my_strdup(t); argvals[argcnt]=0; } else { argnames[argcnt]=NULL; argvals[argcnt]=eval_int_expr(t); }
+                                    byref[argcnt]=0;
+                                }
                                 argcnt++; tok = strtok(NULL, ",");
                             }
                 free(cpy);
@@ -939,6 +990,8 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                     } else {
                         call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
                     }
+                            } else {
+                                errorf("Call to undefined function '%s' at statement '%s'", ftrim, r);
                 }
                 for (int ii=0; ii<argcnt; ++ii) if (argnames[ii]) free(argnames[ii]);
             }
@@ -1191,6 +1244,11 @@ static Program *parse_program(const char *src) {
             f->ret_type = my_strdup(retdat);
             f->body = NULL;
             f->next = NULL;
+            // check duplicate or reserved names
+            for (Function *ex = prog->functions; ex; ex = ex->next) {
+                if (strcmp(ex->name, f->name) == 0) errorf("Duplicate function '%s' defined", f->name);
+            }
+            if (strcasecmp(f->name, "Deschodt") == 0) errorf("Invalid function name '%s' (reserved)", f->name);
             // attach
             if (!prog->functions) prog->functions = f; else {
                 Function *t = prog->functions; while (t->next) t = t->next; t->next = f;

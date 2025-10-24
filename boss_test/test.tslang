@@ -7,13 +7,9 @@ Deschodt Eric() -> int
     eric a = my_strcmp("abc", "abc")
     eric b = my_strcmp("abc", "abd")
     eric c = 20
-    c *= 5
     peric("Comparison result between 'abc' and 'abc': {a}")
     peric("Comparison result between 'abc' and 'abd': {b}")
     peric("Sum of comparison results: {c}")
+    eric test = 10
+    peric("Value of test: {test}")
     deschodt 0
-
-desnote "Length of the string Hello Hello, World! is: 19"
-desnote "Comparison result between 'abc' and 'abc': 0"
-desnote "Comparison result between 'abc' and 'abd': -1"
-desnote "Sum of comparison results: -1"
