@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+int has_paul = 0;
 #include <stdarg.h>
 #include <strings.h>
 #include <unistd.h>
@@ -122,6 +124,43 @@ int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, in
     int *next_instr_offsets = malloc(sizeof(int) * n_msgs);
     unsigned long *msg_offsets_within_messages = malloc(sizeof(unsigned long) * n_msgs);
     unsigned long cum_msg = 0;
+    // We'll also reserve placeholders for a runtime buffer if needed and
+    // record their positions so we can patch the final buffer address
+    // after the full code size is known.
+    int buffer_disp_pos = -1;
+    int buffer_disp_pos2 = -1;
+
+    // If the program will perform a runtime paul/read, emit the read
+    // syscall sequence BEFORE the message-printing loop so the binary
+    // blocks for input prior to printing the peric messages.
+    if (has_paul) {
+        // mov rax, 0 (syscall read)
+        final_code[fi++] = 0x48; final_code[fi++] = 0xb8; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+        // mov rdi, 0 (fd=0)
+        final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc7; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+        // mov rsi, buffer_addr (placeholder)
+        final_code[fi++] = 0x48; final_code[fi++] = 0xbe;
+        buffer_disp_pos = fi;
+        final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0;
+        // mov rdx, 1024
+        final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc2; final_code[fi++] = 0x00; final_code[fi++] = 0x04; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+        // syscall (read)
+        final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
+        // mov rdx, rax (use bytes read)
+        final_code[fi++] = 0x48; final_code[fi++] = 0x89; final_code[fi++] = 0xc2;
+        // mov rax, 1 (write)
+        final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc0; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+        // mov rdi, 1 (stdout)
+        final_code[fi++] = 0x48; final_code[fi++] = 0xc7; final_code[fi++] = 0xc7; final_code[fi++] = 0x01; final_code[fi++] = 0x00; final_code[fi++] = 0x00; final_code[fi++] = 0x00;
+        // mov rsi, buffer_addr (placeholder) for write
+        final_code[fi++] = 0x48; final_code[fi++] = 0xbe;
+        buffer_disp_pos2 = fi;
+        final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0; final_code[fi++] = 0;
+        // syscall (write)
+        final_code[fi++] = 0x0f; final_code[fi++] = 0x05;
+        // Note: we DO NOT patch buffer_addr here; we'll patch after full code size is known.
+    }
+
     for (int i = 0; i < n_msgs; ++i) {
         // lea rsi,[rip+disp]
         final_code[fi++] = 0x48; final_code[fi++] = 0x8d; final_code[fi++] = 0x35;
@@ -143,6 +182,8 @@ int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, in
         msg_offsets_within_messages[i] = cum_msg;
         cum_msg += msg_lens[i];
     }
+
+    /* buffer placeholders will be patched below after we know final code size */
 
     // After printing messages, do exit syscall with retcode
     // mov eax,60 (syscall number for exit)
@@ -171,7 +212,33 @@ int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, in
         final_code[pos + 3] = (unsigned char)((disp_val>>24)&0xff);
     }
 
-    unsigned long filesz = fi + total_msg_bytes;
+    /* Now patch buffer placeholders (if any) so they point to the buffer
+       area which will be placed after the code and all message bytes. */
+    if (buffer_disp_pos != -1 || buffer_disp_pos2 != -1) {
+        unsigned long buffer_addr = entry + fi + total_msg_bytes;
+        if (buffer_disp_pos != -1) {
+            final_code[buffer_disp_pos + 0] = (unsigned char)(buffer_addr & 0xff);
+            final_code[buffer_disp_pos + 1] = (unsigned char)((buffer_addr>>8)&0xff);
+            final_code[buffer_disp_pos + 2] = (unsigned char)((buffer_addr>>16)&0xff);
+            final_code[buffer_disp_pos + 3] = (unsigned char)((buffer_addr>>24)&0xff);
+            final_code[buffer_disp_pos + 4] = (unsigned char)((buffer_addr>>32)&0xff);
+            final_code[buffer_disp_pos + 5] = (unsigned char)((buffer_addr>>40)&0xff);
+            final_code[buffer_disp_pos + 6] = (unsigned char)((buffer_addr>>48)&0xff);
+            final_code[buffer_disp_pos + 7] = (unsigned char)((buffer_addr>>56)&0xff);
+        }
+        if (buffer_disp_pos2 != -1) {
+            final_code[buffer_disp_pos2 + 0] = (unsigned char)(buffer_addr & 0xff);
+            final_code[buffer_disp_pos2 + 1] = (unsigned char)((buffer_addr>>8)&0xff);
+            final_code[buffer_disp_pos2 + 2] = (unsigned char)((buffer_addr>>16)&0xff);
+            final_code[buffer_disp_pos2 + 3] = (unsigned char)((buffer_addr>>24)&0xff);
+            final_code[buffer_disp_pos2 + 4] = (unsigned char)((buffer_addr>>32)&0xff);
+            final_code[buffer_disp_pos2 + 5] = (unsigned char)((buffer_addr>>40)&0xff);
+            final_code[buffer_disp_pos2 + 6] = (unsigned char)((buffer_addr>>48)&0xff);
+            final_code[buffer_disp_pos2 + 7] = (unsigned char)((buffer_addr>>56)&0xff);
+        }
+    }
+
+    unsigned long filesz = fi + total_msg_bytes + (has_paul ? 1024 : 0);
 
     unsigned char e_ident[16] = {0x7f,'E','L','F', 2 /*ELFCLASS64*/, 1 /*LE*/, 1 /*EV_CURRENT*/, 0};
     fwrite(e_ident, 1, 16, f);
@@ -208,6 +275,10 @@ int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, in
     // Write messages concatenated
     for (int i = 0; i < n_msgs; ++i) {
         fwrite(msgs[i], 1, msg_lens[i], f);
+    }
+    if (has_paul) {
+        char buf[1024] = {0};
+        fwrite(buf, 1, 1024, f);
     }
 
     free(disp_positions);
@@ -327,7 +398,8 @@ typedef enum {
     ST_IF,
     ST_OTHER,
     ST_CONTINUE,
-    ST_BREAK
+    ST_BREAK,
+    ST_PAUL
 } StmtKind;
 
 typedef struct Stmt {
@@ -1234,6 +1306,11 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
             (*msg_lens_p)[*n_msgs_p] = (unsigned int)strlen(withn);
             (*n_msgs_p)++;
             free(tmpl);
+        } else if (s->kind == ST_PAUL) {
+            /* Do NOT read input at compile-time. Mark that the generated
+               binary should perform a runtime read and print the value.
+               emit_elf will emit the necessary syscalls when `has_paul` is set. */
+            has_paul = 1;
         } else if (s->kind == ST_RETURN) {
             const char *p = s->raw + strlen("deschodt"); while (*p==' '||*p=='\t') p++;
             /* capture string return if expression refers to a string variable or literal
@@ -1331,6 +1408,13 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                             if (argnames[2]) { Sym *s = sym_get(argnames[2]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR && r->sval) fp = fopen(r->sval, "r"); } }
                             if (!fp) { int fd = (int)argvals[2]; if (fd >= 0) fp = fdopen(fd, "r"); }
                             if (fp) { rv = getline(&line, &linelen, fp); if (rv >= 0 && line) { if (argnames[0]) sym_set_str(argnames[0], line); if (argnames[1]) sym_set_int(argnames[1], (long long)linelen); free(line); } fclose(fp); }
+                        } else if (argcnt >= 1) {
+                            /* paul(var) : read from stdin into var */
+                            rv = getline(&line, &linelen, stdin);
+                            if (rv >= 0 && line) {
+                                if (argnames[0]) sym_set_str(argnames[0], line);
+                                free(line);
+                            }
                         }
                     }
                 } else {
@@ -1662,6 +1746,7 @@ static Program *parse_program(const char *src) {
                 if (pindent == 0) break;
                 // parse nested statements: for, while, if, peric, eric, assign, return
                 if (strncmp(tpeek, "peric(", 6) == 0) append_stmt(&curf->body, make_stmt_indent(ST_PERIC, tpeek, pindent));
+                else if (strncmp(tpeek, "paul(", 5) == 0) append_stmt(&curf->body, make_stmt_indent(ST_PAUL, tpeek, pindent));
                 else if (strncmp(tpeek, "eric ", 5) == 0) append_stmt(&curf->body, make_stmt_indent(ST_ERIC_DECL, tpeek, pindent));
                 else if (strncmp(tpeek, "deschodt", 8) == 0) append_stmt(&curf->body, make_stmt_indent(ST_RETURN, tpeek, pindent));
                 else if (strncmp(tpeek, "deschontinue", 12) == 0) append_stmt(&curf->body, make_stmt_indent(ST_CONTINUE, tpeek, pindent));
@@ -1943,6 +2028,7 @@ static void print_program(Program *p) {
         while (s) {
             const char *kname = "OTHER";
             if (s->kind == ST_PERIC) kname = "PERIC";
+            if (s->kind == ST_PAUL) kname = "PAUL";
             if (s->kind == ST_ERIC_DECL) kname = "ERIC";
             if (s->kind == ST_ASSIGN) kname = "ASSIGN";
             if (s->kind == ST_RETURN) kname = "RETURN";
