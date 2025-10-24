@@ -357,6 +357,18 @@ static int sym_has_field_prefix(const char *prefix) {
     return 0;
 }
 
+/* Heuristic: does this line look like a function call statement? e.g. "name(args)" */
+static int looks_like_call(const char *s) {
+    if (!s) return 0;
+    const char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_')) return 0;
+    p++;
+    while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_' || *p == '.') p++;
+    while (*p == ' ' || *p == '\t') p++;
+    return (*p == '(');
+}
+
 /* Simple recursive-descent expression evaluator for integers */
 typedef struct { const char *s; int pos; } ExprState;
 static void skip_ws(ExprState *e) { while (e->s[e->pos] == ' ' || e->s[e->pos] == '\t') e->pos++; }
@@ -918,6 +930,8 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                             strncat(out, numbuf, sizeof(out)-strlen(out)-1);
                             cur = cbr + 1;
                             continue;
+                        } else {
+                            errorf("Call to undefined function '%s' inside peric placeholder '%s'", ftrim, inner);
                         }
                     }
                 }
@@ -1307,8 +1321,10 @@ static Program *parse_program(const char *src) {
                                 else if (strncmp(t2, "deschodt", 8) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_RETURN, t2, ind2));
                                 else if (strncmp(t2, "deschontinue", 12) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_CONTINUE, t2, ind2));
                                 else if (strncmp(t2, "deschreak", 9) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_BREAK, t2, ind2));
-                                else if (strchr(t2, '=') != NULL) append_stmt(&ifs->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
-                                else append_stmt(&ifs->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                else if (strchr(t2, '=') != NULL) {
+                                    if (looks_like_call(t2)) append_stmt(&ifs->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                    else append_stmt(&ifs->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
+                                } else append_stmt(&ifs->body, make_stmt_indent(ST_OTHER, t2, ind2));
                                 inner2 = strtok(NULL, "\n");
                             }
                             append_stmt(&st->body, ifs);
@@ -1317,8 +1333,10 @@ static Program *parse_program(const char *src) {
                         else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
                         else if (strncmp(tinner, "deschontinue", 12) == 0) append_stmt(&st->body, make_stmt_indent(ST_CONTINUE, tinner, iindent));
                         else if (strncmp(tinner, "deschreak", 9) == 0) append_stmt(&st->body, make_stmt_indent(ST_BREAK, tinner, iindent));
-                        else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
-                        else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                        else if (strchr(tinner, '=') != NULL) {
+                            if (looks_like_call(tinner)) append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                            else append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
+                        } else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
                         inner = strtok(NULL, "\n");
                     }
                     /* resume outer parse from the line that ended the block */
@@ -1347,15 +1365,17 @@ static Program *parse_program(const char *src) {
                             char *inner2 = strtok(NULL, "\n");
                             while (inner2) {
                                 char *r2 = inner2; int ind2 = 0; while (r2[ind2]==' '||r2[ind2]=='\t') ind2++; char *t2 = trim(inner2);
-                                if (t2[0] == '\0') { inner2 = strtok(NULL, "\n"); continue; }
-                                if (ind2 <= iindent) break;
-                                if (strncmp(t2, "peric(", 6) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_PERIC, t2, ind2));
-                                else if (strncmp(t2, "eric ", 5) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_ERIC_DECL, t2, ind2));
-                                else if (strncmp(t2, "deschodt", 8) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_RETURN, t2, ind2));
-                                else if (strncmp(t2, "deschontinue", 12) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_CONTINUE, t2, ind2));
-                                else if (strncmp(t2, "deschreak", 9) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_BREAK, t2, ind2));
-                                else if (strchr(t2, '=') != NULL) append_stmt(&nwh->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
-                                else append_stmt(&nwh->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                            if (t2[0] == '\0') { inner2 = strtok(NULL, "\n"); continue; }
+                                            if (ind2 <= iindent) break;
+                                            if (strncmp(t2, "peric(", 6) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_PERIC, t2, ind2));
+                                            else if (strncmp(t2, "eric ", 5) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_ERIC_DECL, t2, ind2));
+                                            else if (strncmp(t2, "deschodt", 8) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_RETURN, t2, ind2));
+                                            else if (strncmp(t2, "deschontinue", 12) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_CONTINUE, t2, ind2));
+                                            else if (strncmp(t2, "deschreak", 9) == 0) append_stmt(&nwh->body, make_stmt_indent(ST_BREAK, t2, ind2));
+                                            else if (strchr(t2, '=') != NULL) {
+                                                if (looks_like_call(t2)) append_stmt(&nwh->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                                else append_stmt(&nwh->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
+                                            } else append_stmt(&nwh->body, make_stmt_indent(ST_OTHER, t2, ind2));
                                 inner2 = strtok(NULL, "\n");
                             }
                             append_stmt(&st->body, nwh);
@@ -1375,8 +1395,10 @@ static Program *parse_program(const char *src) {
                                 else if (strncmp(t2, "deschodt", 8) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_RETURN, t2, ind2));
                                 else if (strncmp(t2, "deschontinue", 12) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_CONTINUE, t2, ind2));
                                 else if (strncmp(t2, "deschreak", 9) == 0) append_stmt(&ifs->body, make_stmt_indent(ST_BREAK, t2, ind2));
-                                else if (strchr(t2, '=') != NULL) append_stmt(&ifs->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
-                                else append_stmt(&ifs->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                else if (strchr(t2, '=') != NULL) {
+                                    if (looks_like_call(t2)) append_stmt(&ifs->body, make_stmt_indent(ST_OTHER, t2, ind2));
+                                    else append_stmt(&ifs->body, make_stmt_indent(ST_ASSIGN, t2, ind2));
+                                } else append_stmt(&ifs->body, make_stmt_indent(ST_OTHER, t2, ind2));
                                 inner2 = strtok(NULL, "\n");
                             }
                             append_stmt(&st->body, ifs);
@@ -1387,8 +1409,10 @@ static Program *parse_program(const char *src) {
                         else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
                         else if (strncmp(tinner, "deschontinue", 12) == 0) append_stmt(&st->body, make_stmt_indent(ST_CONTINUE, tinner, iindent));
                         else if (strncmp(tinner, "deschreak", 9) == 0) append_stmt(&st->body, make_stmt_indent(ST_BREAK, tinner, iindent));
-                        else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
-                        else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                        else if (strchr(tinner, '=') != NULL) {
+                            if (looks_like_call(tinner)) append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                            else append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
+                        } else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
                         innerw = strtok(NULL, "\n");
                     }
                     peek = innerw; if (!peek) break;
@@ -1410,8 +1434,10 @@ static Program *parse_program(const char *src) {
                         else if (strncmp(tinner, "deschodt", 8) == 0) append_stmt(&st->body, make_stmt_indent(ST_RETURN, tinner, iindent));
                         else if (strncmp(tinner, "deschontinue", 12) == 0) append_stmt(&st->body, make_stmt_indent(ST_CONTINUE, tinner, iindent));
                         else if (strncmp(tinner, "deschreak", 9) == 0) append_stmt(&st->body, make_stmt_indent(ST_BREAK, tinner, iindent));
-                        else if (strchr(tinner, '=') != NULL) append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
-                        else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                        else if (strchr(tinner, '=') != NULL) {
+                            if (looks_like_call(tinner)) append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
+                            else append_stmt(&st->body, make_stmt_indent(ST_ASSIGN, tinner, iindent));
+                        } else append_stmt(&st->body, make_stmt_indent(ST_OTHER, tinner, iindent));
                         inneri = strtok(NULL, "\n");
                     }
                     peek = inneri; if (!peek) break; 
@@ -1434,16 +1460,20 @@ static Program *parse_program(const char *src) {
                                 else if (strncmp(ttr, "deschodt", 8) == 0) append_stmt(&last->else_body, make_stmt(ST_RETURN, ttr));
                                 else if (strncmp(ttr, "deschontinue", 12) == 0) append_stmt(&last->else_body, make_stmt(ST_CONTINUE, ttr));
                                 else if (strncmp(ttr, "deschreak", 9) == 0) append_stmt(&last->else_body, make_stmt(ST_BREAK, ttr));
-                                else if (strchr(ttr, '=') != NULL) append_stmt(&last->else_body, make_stmt(ST_ASSIGN, ttr));
-                                else append_stmt(&last->else_body, make_stmt(ST_OTHER, ttr));
+                                else if (strchr(ttr, '=') != NULL) {
+                                    if (looks_like_call(ttr)) append_stmt(&last->else_body, make_stmt(ST_OTHER, ttr));
+                                    else append_stmt(&last->else_body, make_stmt(ST_ASSIGN, ttr));
+                                } else append_stmt(&last->else_body, make_stmt(ST_OTHER, ttr));
                             elsepeek = strtok(NULL, "\n");
                         }
                         // resume parse from elsepeek
                         peek = elsepeek; line = peek; continue;
                     }
                 }
-                else if (strchr(tpeek, '=') != NULL) append_stmt(&curf->body, make_stmt(ST_ASSIGN, tpeek));
-                else append_stmt(&curf->body, make_stmt(ST_OTHER, tpeek));
+                else if (strchr(tpeek, '=') != NULL) {
+                    if (looks_like_call(tpeek)) append_stmt(&curf->body, make_stmt(ST_OTHER, tpeek));
+                    else append_stmt(&curf->body, make_stmt(ST_ASSIGN, tpeek));
+                } else append_stmt(&curf->body, make_stmt(ST_OTHER, tpeek));
                 peek = strtok(NULL, "\n");
             }
             // continue from peek (which might be top-level) - strtok state already advanced, so set line accordingly
