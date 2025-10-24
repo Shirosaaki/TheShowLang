@@ -1,14 +1,6 @@
 Deschodt Eric() -> int
-    eric fd = sammy("example", "r")
-    erif (fd < 0):
-        peric("Failed to open file.")
-        deschodt 1
-    eric file_content -> char *
-    file_content = ""
     eric buffer -> char *
     buffer = ""
-    john(fd, buffer)
-    peric("File content:\n{buffer}")
-    rogers(fd)
-    buffer = ""
-    paul(&buffer, 0)
+    buffer = paul()
+    peric("Read line from stdin:\n{buffer}")
+    deschodt 0
