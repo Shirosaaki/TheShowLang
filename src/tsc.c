@@ -241,7 +241,7 @@ typedef struct Program {
 static Program *g_program;
 static Function *find_function(const char *name);
 static long long call_function_compiletime(Function *fn, long long *args, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
-static long long call_function_compiletime_with_refs(Function *fn, long long *arg_vals, char **arg_names, int *by_ref, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
+static long long call_function_compiletime_with_refs(Function *fn, long long *arg_vals, char **arg_names, int *by_ref, int nargs, const char *assign_lhs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
 static char *trim(char *s);
 
 /* forward declaration for helper used when normalizing LHS in assignments */
@@ -616,8 +616,9 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 /* extract LHS name */
                 const char *name_start = p; while (*name_start == ' ' || *name_start=='\t') name_start++; const char *name_end = eq; while (name_end > name_start && (*(name_end-1)==' '||*(name_end-1)=='\t')) name_end--; int namelen = name_end - name_start; char name[256]; if (namelen >= (int)sizeof(name)) namelen = sizeof(name)-1; memcpy(name, name_start, namelen); name[namelen] = '\0';
                 const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
-                if (rhs[0] == '"') {
-                    const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
+                if (rhs[0] == '"' || rhs[0] == '\'') {
+                    char q = rhs[0];
+                    const char *q2 = strchr(rhs+1, q); if (!q2) q2 = rhs+1; size_t llen = q2 - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
                 } else {
                     /* detect function call like fname(arg1, arg2) */
                     const char *op = strchr(rhs, '(');
@@ -635,8 +636,8 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                                     argnames[argcnt] = my_strdup(n);
                                                     byref[argcnt] = 1;
                                                     argvals[argcnt] = 0;
-                                                } else if (t[0] == '"') {
-                                                    /* literal string argument: create temporary literal symbol and pass its name */
+                                                } else if (t[0] == '"' || t[0] == '\'') {
+                                                    /* literal string/char argument: create temporary literal symbol and pass its name */
                                                     char *tmpname = create_literal_string(t);
                                                     argnames[argcnt] = tmpname;
                                                     byref[argcnt] = 0;
@@ -682,7 +683,7 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                     }
                                     sym_set_int(name, cres);
                                 } else {
-                                    long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
+                                    long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, name, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
                                     sym_set_int(name, cres);
                                 }
                             } else {
@@ -751,7 +752,7 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
                 /* If RHS contains a '+' outside quotes, evaluate as string concatenation (preserve strings) */
                 int plus_found_local = 0; const char *ppp = rhs; while (*ppp) {
-                    if (*ppp == '"') { ppp++; while (*ppp && *ppp != '"') ppp++; if (*ppp) ppp++; }
+                    if (*ppp == '"' || *ppp == '\'') { char q = *ppp; ppp++; while (*ppp && *ppp != q) ppp++; if (*ppp) ppp++; }
                     else { if (*ppp == '+') { plus_found_local = 1; break; } ppp++; }
                 }
                 if (plus_found_local) {
@@ -778,9 +779,9 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                     /* perform augmented op based on LHS type */
                     Sym *ls = sym_get(name);
                     Sym *lr = ls ? sym_resolve(ls) : NULL;
-                    if (aug_op_token == '+') {
-                        /* string concat if LHS is string or RHS is quoted or RHS contains quotes */
-                        if ((lr && lr->type == SYM_STR) || strchr(rhs, '"')) {
+            if (aug_op_token == '+') {
+                /* string concat if LHS is string or RHS is quoted or RHS contains quotes */
+                if ((lr && lr->type == SYM_STR) || strchr(rhs, '"') || strchr(rhs, '\'')) {
                             char *rhsstr = eval_concat_string(rhs);
                             const char *left = (lr && lr->type == SYM_STR && lr->sval) ? lr->sval : "";
                             size_t nl = strlen(left) + (rhsstr ? strlen(rhsstr) : 0);
@@ -819,8 +820,8 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                     }
                     goto ASSIGN_DONE_LABEL;
                 }
-                if (rhs[0] == '"') {
-                    const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; size_t llen = q - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
+                if (rhs[0] == '"' || rhs[0] == '\'') {
+                    char q = rhs[0]; const char *q2 = strchr(rhs+1, q); if (!q2) q2 = rhs+1; size_t llen = q2 - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
                 } else {
                     /* detect function call like fname(arg1, arg2) */
                     const char *op = strchr(rhs, '(');
@@ -863,7 +864,7 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                     if (s1 && s2) cres = (long long)strcmp(s1, s2);
                                     sym_set_int(name, cres);
                                 } else {
-                                    long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
+                                    long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, name, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
                                     sym_set_int(name, cres);
                                 }
                             } else {
@@ -982,7 +983,7 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                             while (tok && argcnt < 8) {
                                 char *t = trim(tok);
                                 if (t[0] == '&') { char *n = trim(t+1); argnames[argcnt] = my_strdup(n); byref[argcnt] = 1; argvals[argcnt]=0; }
-                                else if (t[0] == '"') { argnames[argcnt] = create_literal_string(t); byref[argcnt]=0; argvals[argcnt]=0; }
+                                else if (t[0] == '"' || t[0] == '\'') { argnames[argcnt] = create_literal_string(t); byref[argcnt]=0; argvals[argcnt]=0; }
                                 else {
                                     int is_id = 1;
                                     if (!((t[0] >= 'a' && t[0] <= 'z') || (t[0] >= 'A' && t[0] <= 'Z') || t[0] == '_')) is_id = 0;
@@ -1002,7 +1003,7 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                             /* do nothing (user may call as statement) */
                         }
                     } else {
-                        call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
+                        call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, NULL, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
                     }
                             } else {
                                 errorf("Call to undefined function '%s' at statement '%s'", ftrim, r);
@@ -1108,12 +1109,13 @@ static char *extract_ident_from_lhs(const char *s, char *out, size_t outsz) {
 static int g_litstr_counter = 0;
 static char *create_literal_string(const char *lit) {
     if (!lit) return NULL;
-    /* lit points to a quoted string ("...") or just content; normalize by removing surrounding quotes if present */
+    /* lit points to a quoted string ("..." or '...') or just content; normalize by removing surrounding quotes if present */
     const char *start = lit;
-    if (*start == '"') start++;
+    char q = 0;
+    if (*start == '"' || *start == '\'') { q = *start; start++; }
     size_t len = strlen(start);
     const char *end = start + len - 1;
-    if (len > 0 && *end == '"') { len--; }
+    if (q && len > 0 && *end == q) { len--; }
     char *buf = malloc(len + 1);
     memcpy(buf, start, len);
     buf[len] = '\0';
@@ -1134,15 +1136,16 @@ static char *eval_concat_string(const char *expr) {
     while (*p) {
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '\0') break;
-        if (*p == '"') {
+        if (*p == '"' || *p == '\'') {
+            char q = *p;
             p++; const char *start = p;
-            while (*p && *p != '"') p++;
+            while (*p && *p != q) p++;
             int len = p - start;
             char *s = malloc(len + 1);
             if (!s) return NULL;
             memcpy(s, start, len); s[len] = '\0';
             parts[np++] = s;
-            if (*p == '"') p++;
+            if (*p == q) p++;
         } else {
             /* collect until '+' at same level or end */
             const char *start = p;
@@ -1171,8 +1174,8 @@ static char *eval_concat_string(const char *expr) {
             free(tok);
         }
         /* skip spaces and a single '+' if present */
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '+') { p++; continue; }
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '+') { p++; continue; }
     }
 
     /* compute total length */
@@ -1216,10 +1219,11 @@ static Stmt *make_stmt_indent(StmtKind k, const char *rawline, int indent) {
 static void syntax_check_or_error(const char *line) {
     if (!line) return;
     int paren = 0;
-    int in_str = 0;
+    int in_str = 0; char quote = 0;
     for (const char *c = line; *c; ++c) {
-        if (*c == '"') {
-            in_str = !in_str;
+        if (*c == '"' || *c == '\'') {
+            if (!in_str) { in_str = 1; quote = *c; }
+            else if (quote == *c) { in_str = 0; quote = 0; }
             continue;
         }
         if (in_str) continue;
@@ -1542,8 +1546,8 @@ static void process_top_level_decls(const char *filtered) {
                 int nlen = name_end - name_start; char name[128]; if (nlen >= (int)sizeof(name)) nlen = sizeof(name)-1; memcpy(name, name_start, nlen); name[nlen] = '\0';
                 const char *rhs = eq + 1; while (*rhs==' '||*rhs=='\t') rhs++;
                 // if quoted string
-                if (rhs[0] == '"') {
-                    const char *q = strchr(rhs+1, '"'); if (!q) q = rhs+1; int vlen = q - (rhs+1); char val[256]; if (vlen >= (int)sizeof(val)) vlen = sizeof(val)-1; memcpy(val, rhs+1, vlen); val[vlen] = '\0';
+                if (rhs[0] == '"' || rhs[0] == '\'') {
+                    char q = rhs[0]; const char *q2 = strchr(rhs+1, q); if (!q2) q2 = rhs+1; int vlen = q2 - (rhs+1); char val[256]; if (vlen >= (int)sizeof(val)) vlen = sizeof(val)-1; memcpy(val, rhs+1, vlen); val[vlen] = '\0';
                     sym_set_str(name, val);
                 } else {
                     // decide int vs string (float contains '.')
@@ -1704,12 +1708,19 @@ static Function *find_function(const char *name) {
    arg_names: array of strings for each arg (if by_ref[i]==1, arg_names[i] is the variable name in caller to alias),
    otherwise arg_names[i] may be NULL and arg_vals[i] used.
 */
-static long long call_function_compiletime_with_refs(Function *fn, long long *arg_vals, char **arg_names, int *by_ref, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p) {
+static long long call_function_compiletime_with_refs(Function *fn, long long *arg_vals, char **arg_names, int *by_ref, int nargs, const char *assign_lhs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p) {
     if (!fn) return 0;
     // Save caller table and create fresh sym_table for callee
     Sym *saved = sym_table;
     Sym *caller_table = saved; // keep pointer to locate targets
-    sym_table = NULL; // new callee table
+    int use_caller_table = (assign_lhs != NULL);
+    if (use_caller_table) {
+        /* execute callee in caller's symbol table so callee-created symbols
+           are directly visible to caller (implements `lhs = fn(...)` auto-aliasing) */
+        sym_table = caller_table;
+    } else {
+        sym_table = NULL; // new callee table
+    }
     // bind parameters
     if (fn->params) {
         const char *p = fn->params;
@@ -1798,6 +1809,30 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
         }
         free(cpy);
     }
+    /* If caller requested to receive callee-created symbols with the given LHS name,
+       copy matching callee symbols (exact name, or name[...] or name.field) into caller_table.
+       This allows code like `tab = foo(...)` where `foo` creates `tab[i]` entries to populate
+       the caller's `tab` symbol. */
+    if (assign_lhs && assign_lhs[0]) {
+        printf("DEBUG: callee_table symbols:\n");
+        for (Sym *pp = sym_table; pp; pp = pp->next) {
+            printf("  %s (type=%d)\n", pp->name, pp->type);
+        }
+        size_t alen = strlen(assign_lhs);
+        for (Sym *pp = sym_table; pp; pp = pp->next) {
+            if (strcmp(pp->name, assign_lhs) == 0 || (strncmp(pp->name, assign_lhs, alen) == 0 && (pp->name[alen] == '[' || pp->name[alen] == '.'))) {
+                printf("DEBUG: copying callee symbol '%s' to caller_table for assign_lhs '%s'\n", pp->name, assign_lhs);
+                Sym *r = sym_resolve(pp);
+                if (r) {
+                    Sym *saved_sym = sym_table;
+                    sym_table = caller_table;
+                    if (r->type == SYM_INT) sym_set_int(pp->name, r->ival);
+                    else if (r->type == SYM_STR) sym_set_str(pp->name, r->sval ? r->sval : "");
+                    sym_table = saved_sym;
+                }
+            }
+        }
+    }
     int local_max = 4; char **local_msgs = malloc(sizeof(char*) * local_max); unsigned int *local_lens = malloc(sizeof(unsigned int) * local_max); int local_n = 0; int retcode = 0;
     // set globals so nested calls inside callee append into local_msgs
     char ***old_msgs_p = g_msgs_p; unsigned int **old_msg_lens_p = g_msg_lens_p; int *old_n_msgs_p = g_n_msgs_p; int *old_max_msgs_p = g_max_msgs_p;
@@ -1852,9 +1887,14 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
     }
     free(local_lens);
     free(local_msgs);
-    // clear callee sym_table and restore caller
-    sym_clear();
-    sym_table = caller_table;
+    // clear callee sym_table and restore caller if we created a private callee table
+    if (!use_caller_table) {
+        sym_clear();
+        sym_table = caller_table;
+    } else {
+        /* we executed inside caller_table; leave caller_table intact and restore sym_table to saved */
+        sym_table = caller_table;
+    }
     /* Ensure caller_table contains aliases for callee parameter fields like 'v.field' -> 'car.field' */
     if (fn->params) {
         const char *p2 = fn->params;
@@ -1895,5 +1935,5 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
 
 /* Backwards-compatible wrapper: no refs */
 static long long call_function_compiletime(Function *fn, long long *args, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p) {
-    return call_function_compiletime_with_refs(fn, args, NULL, NULL, nargs, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
+    return call_function_compiletime_with_refs(fn, args, NULL, NULL, nargs, NULL, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
 }
