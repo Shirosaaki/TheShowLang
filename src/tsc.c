@@ -241,6 +241,19 @@ static long long eval_int_expr(const char *expr);
 static char *create_literal_string(const char *lit);
 /* forward-declare helper to evaluate string concatenation expressions like: a + "b" + c */
 static char *eval_concat_string(const char *expr);
+/* detect augmented assignment operator token immediately before '=' in a statement line
+   returns operator char ('+','-','*','/','%') or 0 if none
+   This is robust to spacing between the operator and '='. */
+static char detect_aug_assign_op(const char *line, const char *eqpos) {
+    if (!line || !eqpos) return 0;
+    const char *p = eqpos - 1;
+    /* skip spaces before '=' */
+    while (p >= line && (*p == ' ' || *p == '\t')) p--;
+    if (p < line) return 0;
+    char c = *p;
+    if (c == '+' || c == '-' || c == '*' || c == '/' || c == '%') return c;
+    return 0;
+}
 
 /* Global pointers to the current message buffers used during exec_stmt_list.
     These are set by execute_function_compiletime and call_function_compiletime helpers
@@ -657,7 +670,12 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                             char numbuf[32]; int nlen = cbr - obr - 1; if (nlen >= (int)sizeof(numbuf)) nlen = sizeof(numbuf)-1; memcpy(numbuf, obr+1, nlen); numbuf[nlen] = '\0'; int count = atoi(numbuf);
                             for (int ii = 0; ii < count; ++ii) { char key[256]; snprintf(key, sizeof(key), "%s[%d]", name, ii); sym_set_int(key, 0); }
                         } else {
-                            sym_set_int(name, 0);
+                            /* if declared as char * or contains '*' in type, initialize as empty string */
+                            if (strstr(typ, "char") || strchr(typ, '*')) {
+                                sym_set_str(name, "");
+                            } else {
+                                sym_set_int(name, 0);
+                            }
                         }
                     } else {
                         sym_set_int(name, 0);
@@ -671,11 +689,14 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 const char *lhs_end = eq; while (lhs_end > lhs_start && (*(lhs_end-1)==' '||*(lhs_end-1)=='\t')) lhs_end--;
                 int namelen = lhs_end - lhs_start;
                 char raw_lhs[256]; if (namelen >= (int)sizeof(raw_lhs)) namelen = sizeof(raw_lhs)-1; memcpy(raw_lhs, lhs_start, namelen); raw_lhs[namelen] = '\0';
+                /* strip trailing operator characters that may be present in augmented assignment like 'src +' */
+                int rlen = (int)strlen(raw_lhs);
+                while (rlen > 0 && (raw_lhs[rlen-1] == ' ' || raw_lhs[rlen-1] == '\t' || raw_lhs[rlen-1] == '+' || raw_lhs[rlen-1] == '-' || raw_lhs[rlen-1] == '*' || raw_lhs[rlen-1] == '/' || raw_lhs[rlen-1] == '%')) { raw_lhs[rlen-1] = '\0'; rlen--; }
                 /* detect if LHS is a dereference like '*name' (first non-space is '*') */
                 int deref_flag = 0; for (int _i=0; raw_lhs[_i]; ++_i) { if (raw_lhs[_i] == ' ' || raw_lhs[_i] == '\t') continue; if (raw_lhs[_i] == '*') deref_flag = 1; break; }
                 char name[256]; extract_ident_from_lhs(raw_lhs, name, sizeof(name));
                 const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
-                /* If RHS contains a '+' outside quotes, evaluate as string concatenation */
+                /* If RHS contains a '+' outside quotes, evaluate as string concatenation (preserve strings) */
                 int plus_found_local = 0; const char *ppp = rhs; while (*ppp) {
                     if (*ppp == '"') { ppp++; while (*ppp && *ppp != '"') ppp++; if (*ppp) ppp++; }
                     else { if (*ppp == '+') { plus_found_local = 1; break; } ppp++; }
@@ -684,6 +705,63 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                     char *cres = eval_concat_string(rhs);
                     if (cres) { sym_set_str(name, cres); free(cres); }
                     /* done with assignment */
+                    goto ASSIGN_DONE_LABEL;
+                }
+
+                /* Detect augmented assignment operator token robustly */
+                char aug_op_token = detect_aug_assign_op(p, eq);
+                /* Fallback: scan the region between lhs_start and eq for an operator character
+                   (handles cases where the '=' parsing/trimming removed the operator). */
+                if (!aug_op_token) {
+                    const char *scanptr = lhs_start; const char *lastop = NULL;
+                    while (scanptr < eq) {
+                        if (*scanptr == '+' || *scanptr == '-' || *scanptr == '*' || *scanptr == '/' || *scanptr == '%') lastop = scanptr;
+                        scanptr++;
+                    }
+                    if (lastop) aug_op_token = *lastop;
+                }
+                if (aug_op_token) {
+                    printf("DEBUG: AUG_ASSIGN detected name='%s' op='%c' raw_lhs='%s' rhs='%s'\n", name, aug_op_token, raw_lhs, rhs);
+                    /* perform augmented op based on LHS type */
+                    Sym *ls = sym_get(name);
+                    Sym *lr = ls ? sym_resolve(ls) : NULL;
+                    if (aug_op_token == '+') {
+                        /* string concat if LHS is string or RHS is quoted or RHS contains quotes */
+                        if ((lr && lr->type == SYM_STR) || strchr(rhs, '"')) {
+                            char *rhsstr = eval_concat_string(rhs);
+                            const char *left = (lr && lr->type == SYM_STR && lr->sval) ? lr->sval : "";
+                            size_t nl = strlen(left) + (rhsstr ? strlen(rhsstr) : 0);
+                            char *nstr = malloc(nl + 1);
+                            if (nstr) {
+                                nstr[0] = '\0'; strcat(nstr, left); if (rhsstr) strcat(nstr, rhsstr);
+                                sym_set_str(name, nstr);
+                                free(nstr);
+                            }
+                            if (rhsstr) free(rhsstr);
+                            Sym *nn = sym_get(name); if (nn) { Sym *nr = sym_resolve(nn); if (nr && nr->type==SYM_STR) printf("DEBUG: AUG_ASSIGN result '%s'\n", nr->sval?nr->sval:"(null)"); }
+                        } else {
+                            long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
+                            long long add = eval_int_expr(rhs);
+                            sym_set_int(name, cur + add);
+                            Sym *nn = sym_get(name); if (nn) { Sym *nr = sym_resolve(nn); if (nr && nr->type==SYM_INT) printf("DEBUG: AUG_ASSIGN result %lld\n", nr->ival); }
+                        }
+                    } else if (aug_op_token == '-') {
+                        long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
+                        long long sub = eval_int_expr(rhs);
+                        sym_set_int(name, cur - sub);
+                    } else if (aug_op_token == '*') {
+                        long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
+                        long long mul = eval_int_expr(rhs);
+                        sym_set_int(name, cur * mul);
+                    } else if (aug_op_token == '/') {
+                        long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
+                        long long dv = eval_int_expr(rhs);
+                        if (dv != 0) sym_set_int(name, cur / dv); else sym_set_int(name, 0);
+                    } else if (aug_op_token == '%') {
+                        long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
+                        long long dv = eval_int_expr(rhs);
+                        if (dv != 0) sym_set_int(name, cur % dv); else sym_set_int(name, 0);
+                    }
                     goto ASSIGN_DONE_LABEL;
                 }
                 if (rhs[0] == '"') {

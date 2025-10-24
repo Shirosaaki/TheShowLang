@@ -23,6 +23,6 @@ clean:
 	rm -f ${OBJ}
 
 fclean:	clean
-	rm -f tcs
+	rm -f ${BIN_DIR}/tsc
 
 re:	fclean all
