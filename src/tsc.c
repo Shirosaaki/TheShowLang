@@ -1,3 +1,5 @@
+/* expose POSIX functions like getline()/fdopen() */
+#define _POSIX_C_SOURCE 200809L
 /**==============================================
  *                tsc.c
  *  TheShowLang minimal compiler to ELF64
@@ -9,6 +11,10 @@
 #include <string.h>
 #include <stdarg.h>
 #include <strings.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 /* fallback strdup for strict compilation environments */
 static char *my_strdup(const char *s) {
@@ -207,47 +213,13 @@ int emit_elf(const char *out_path, const char **msgs, unsigned int *msg_lens, in
     free(disp_positions);
     free(next_instr_offsets);
     free(msg_offsets_within_messages);
-
     fclose(f);
     return 0;
 }
-
-/* --- lightweight parser (line-oriented) ---
-   This builds a simple AST with top-level constructs (functions, destruct, enums)
-   and function bodies as a list of statement strings. It's sufficient as a
-   first step before implementing a full expression parser and native codegen.
-*/
-
-typedef enum { ST_PERIC, ST_ERIC_DECL, ST_ASSIGN, ST_RETURN, ST_CONTINUE, ST_BREAK, ST_OTHER, ST_FOR, ST_WHILE, ST_IF } StmtKind;
-
-typedef struct Stmt {
-    StmtKind kind;
-    char *raw; // original line trimmed
-    struct Stmt *next;
-    struct Stmt *body; // nested block
-    struct Stmt *else_body; // for if/else
-    char *cond; // condition or extra data (e.g., range args)
-    char *it_name; // iterator name for for-loops
-    int indent; // number of leading spaces (for block detection)
-} Stmt;
-
-typedef struct Function {
-    char *name;
-    char *ret_type;
-    char *params; // raw param string for now
-    Stmt *body;
-    struct Function *next;
-} Function;
-
-typedef struct Program {
-    Function *functions;
-} Program;
-
-/* forward declarations for compile-time function call support */
-static Program *g_program;
-static Function *find_function(const char *name);
-static long long call_function_compiletime(Function *fn, long long *args, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
-static long long call_function_compiletime_with_refs(Function *fn, long long *arg_vals, char **arg_names, int *by_ref, int nargs, const char *assign_lhs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
+static struct Program *g_program;
+static struct Function *find_function(const char *name);
+static long long call_function_compiletime(struct Function *fn, long long *args, int nargs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
+static long long call_function_compiletime_with_refs(struct Function *fn, long long *arg_vals, char **arg_names, int *by_ref, int nargs, const char *assign_lhs, char ***msgs_p, unsigned int **msg_lens_p, int *n_msgs_p, int *max_msgs_p);
 static char *trim(char *s);
 
 /* forward declaration for helper used when normalizing LHS in assignments */
@@ -343,6 +315,42 @@ static Sym *sym_get(const char *name) {
 static void sym_clear(void) {
     Sym *p = sym_table; while (p) { Sym *n = p->next; free(p->name); if (p->type==SYM_STR && p->sval) free(p->sval); /* do not free alias_target here */ free(p); p = n; } sym_table = NULL;
 }
+
+/* AST structs used by the simple parser/interpreter */
+typedef enum {
+    ST_PERIC,
+    ST_ERIC_DECL,
+    ST_ASSIGN,
+    ST_RETURN,
+    ST_FOR,
+    ST_WHILE,
+    ST_IF,
+    ST_OTHER,
+    ST_CONTINUE,
+    ST_BREAK
+} StmtKind;
+
+typedef struct Stmt {
+    StmtKind kind;
+    char *raw;
+    struct Stmt *next;
+    struct Stmt *body;       /* used for blocks (for/if/while) */
+    struct Stmt *else_body;  /* used for if/else */
+    char *cond;              /* condition text */
+    char *it_name;           /* iterator name for for-loops */
+    int indent;
+} Stmt;
+
+typedef struct Function {
+    char *name;
+    char *params;
+    char *ret_type;
+    Stmt *body;
+    struct Function *next;
+} Function;
+
+typedef struct Program { Function *functions; } Program;
+
 
 /* Create an alias symbol in current sym_table that points to target Sym */
 static void sym_set_alias(const char *name, Sym *target) {
@@ -861,34 +869,42 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                                 argcnt++; tok = strtok(NULL, ",");
                                             }
                                             free(cpy);
+                            /* Call handling: prefer language functions, but allow a few host-level
+                               helpers at compile-time. Keep the structure simple and balanced. */
                             Function *fn = find_function(ftrim);
                             if (fn) {
-                                          /* Special-case common builtins to avoid issues with user-space compile-time execution
-                                              (my_strlen, my_strcmp). These operate directly on symbol table entries. */
-                                if (strcmp(ftrim, "my_strlen") == 0 && argcnt >= 1) {
-                                    long long cres = 0;
-                                    if (argnames[0]) {
-                                        Sym *s = sym_get(argnames[0]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR && r->sval) cres = (long long)strlen(r->sval); }
-                                    } else {
-                                        /* fallback to eval_int_expr on first arg */
-                                        long long v = argvals[0]; cres = v;
+                                /* language-level function: delegate to call wrapper */
+                                long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, name, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
+                                /* If callee produced a string return, don't overwrite it with integer */
+                                if (!g_last_return_was_str) sym_set_int(name, cres);
+                            } else if (strcmp(ftrim, "sammy") == 0 || strcmp(ftrim, "rogers") == 0 || strcmp(ftrim, "john") == 0 || strcmp(ftrim, "paul") == 0) {
+                                /* simple host helpers implemented inline (mirror C semantics) */
+                                if (strcmp(ftrim, "sammy") == 0) {
+                                    int fd = -1; char *path = NULL; int flags = 0; mode_t mode = 0;
+                                    if (argcnt >= 1 && argnames[0]) { Sym *s = sym_get(argnames[0]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR) path = r->sval; } }
+                                    if (argcnt >= 2) { if (argnames[1]) { Sym *s = sym_get(argnames[1]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR && r->sval) { if (strcmp(r->sval, "r") == 0) flags = O_RDONLY; else if (strcmp(r->sval, "w") == 0) flags = O_WRONLY | O_CREAT | O_TRUNC; else if (strcmp(r->sval, "a") == 0) flags = O_WRONLY | O_CREAT | O_APPEND; else if (strcmp(r->sval, "r+") == 0) flags = O_RDWR; else flags = O_RDONLY; } } } else { flags = (int)argvals[1]; } }
+                                    if (argcnt >= 3) mode = (mode_t)argvals[2];
+                                    if (path) fd = open(path, flags, mode);
+                                    sym_set_int(name, fd);
+                                } else if (strcmp(ftrim, "rogers") == 0) {
+                                    int res = -1; int fd = -1; if (argcnt >= 1) { if (argnames[0]) { Sym *s = sym_get(argnames[0]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_INT) fd = (int)r->ival; } } else fd = (int)argvals[0]; if (fd >= 0) res = close(fd); } sym_set_int(name, res);
+                                } else if (strcmp(ftrim, "john") == 0) {
+                                    ssize_t nread = -1; int fd = -1; char *dstname = NULL;
+                                    if (argcnt >= 1) { if (argnames[0]) { Sym *s = sym_get(argnames[0]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_INT) fd = (int)r->ival; } } else fd = (int)argvals[0]; }
+                                    if (argcnt >= 2 && argnames[1]) dstname = argnames[1];
+                                    if (fd >= 0 && dstname) {
+                                        if (argcnt >= 3) { size_t cnt = (size_t)argvals[2]; char *buf = malloc(cnt + 1); if (buf) { nread = read(fd, buf, cnt); if (nread > 0) { buf[nread] = '\0'; sym_set_str(dstname, buf); } free(buf); } }
+                                        else { size_t cap = 4096; size_t pos = 0; char *buf = malloc(cap+1); if (buf) { while (1) { ssize_t r = read(fd, buf + pos, cap - pos); if (r > 0) { pos += r; if (cap - pos < 1024) { cap *= 2; char *nb = realloc(buf, cap+1); if (!nb) break; buf = nb; } } else if (r == 0) break; else break; } nread = (ssize_t)pos; buf[pos] = '\0'; sym_set_str(dstname, buf); free(buf); } }
                                     }
-                                    sym_set_int(name, cres);
-                                } else if (strcmp(ftrim, "my_strcmp") == 0 && argcnt >= 2) {
-                                    long long cres = 0;
-                                    char *s1 = NULL; char *s2 = NULL;
-                                    if (argnames[0]) { Sym *a = sym_get(argnames[0]); if (a) { Sym *ra = sym_resolve(a); if (ra && ra->type==SYM_STR) s1 = ra->sval; } }
-                                    if (argnames[1]) { Sym *b = sym_get(argnames[1]); if (b) { Sym *rb = sym_resolve(b); if (rb && rb->type==SYM_STR) s2 = rb->sval; } }
-                                    if (s1 && s2) {
-                                        /* lexicographic compare */
-                                        cres = (long long)strcmp(s1, s2);
+                                    sym_set_int(name, (long long)nread);
+                                } else if (strcmp(ftrim, "paul") == 0) {
+                                    ssize_t rv = -1; char *line = NULL; size_t linelen = 0; FILE *fp = NULL;
+                                    if (argcnt >= 3) {
+                                        if (argnames[2]) { Sym *s = sym_get(argnames[2]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR && r->sval) fp = fopen(r->sval, "r"); } }
+                                        if (!fp) { int fd = (int)argvals[2]; if (fd >= 0) fp = fdopen(fd, "r"); }
+                                        if (fp) { rv = getline(&line, &linelen, fp); if (rv >= 0 && line) { if (argnames[0]) sym_set_str(argnames[0], line); if (argnames[1]) sym_set_int(argnames[1], (long long)linelen); free(line); } fclose(fp); }
                                     }
-                                    sym_set_int(name, cres);
-                                } else {
-                                    long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, name, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
-                                    /* If the callee produced a string return assigned into 'name', avoid
-                                        overwriting it with the integer return value. */
-                                    if (!g_last_return_was_str) sym_set_int(name, cres);
+                                    sym_set_int(name, (long long)rv);
                                 }
                             } else {
                                 errorf("Call to undefined function '%s' in assignment to '%s'", ftrim, name);
@@ -1142,14 +1158,30 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
             char *tmpl = malloc(len+1);
             memcpy(tmpl, q, len);
             tmpl[len] = '\0';
-            char out[1024]; out[0] = '\0';
+            /* build output dynamically to avoid truncation for large templates */
+            size_t out_cap = 1024; size_t out_len = 0; char *out = malloc(out_cap);
+            if (!out) { free(tmpl); s = s->next; continue; }
+            out[0] = '\0';
             const char *cur = tmpl;
             while (*cur) {
                 const char *obr = strchr(cur, '{');
-                if (!obr) { strncat(out, cur, sizeof(out)-strlen(out)-1); break; }
-                strncat(out, cur, obr - cur);
+                if (!obr) {
+                    size_t need = strlen(cur);
+                    if (out_len + need + 1 > out_cap) { out_cap = out_len + need + 1; char *nb = realloc(out, out_cap); if (!nb) break; out = nb; }
+                    memcpy(out + out_len, cur, need); out_len += need; out[out_len] = '\0';
+                    break;
+                }
+                size_t chunk = obr - cur;
+                if (out_len + chunk + 1 > out_cap) { out_cap = out_len + chunk + 1; char *nb = realloc(out, out_cap); if (!nb) break; out = nb; }
+                memcpy(out + out_len, cur, chunk); out_len += chunk; out[out_len] = '\0';
                 const char *cbr = strchr(obr, '}');
-                if (!cbr) { strncat(out, obr, sizeof(out)-strlen(out)-1); break; }
+                if (!cbr) {
+                    /* append rest */
+                    size_t rest = strlen(obr);
+                    if (out_len + rest + 1 > out_cap) { out_cap = out_len + rest + 1; char *nb = realloc(out, out_cap); if (!nb) break; out = nb; }
+                    memcpy(out + out_len, obr, rest); out_len += rest; out[out_len] = '\0';
+                    break;
+                }
                 int ilen = cbr - (obr+1);
                 char inner[256]; if (ilen >= (int)sizeof(inner)) ilen = sizeof(inner)-1; memcpy(inner, obr+1, ilen); inner[ilen] = '\0';
 
@@ -1167,7 +1199,9 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                         if (ff) {
                             long long cres = call_function_compiletime(ff, argvals, argcnt, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
                             char numbuf[64]; snprintf(numbuf, sizeof(numbuf), "%lld", cres);
-                            strncat(out, numbuf, sizeof(out)-strlen(out)-1);
+                            size_t need = strlen(numbuf);
+                            if (out_len + need + 1 > out_cap) { out_cap = out_len + need + 1; char *nb = realloc(out, out_cap); if (!nb) { free(out); free(tmpl); errorf("out of memory in peric"); } out = nb; }
+                            memcpy(out + out_len, numbuf, need); out_len += need; out[out_len] = '\0';
                             cur = cbr + 1;
                             continue;
                         } else {
@@ -1177,7 +1211,9 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 }
 
                 char *evaled = eval_placeholder(inner);
-                strncat(out, evaled, sizeof(out)-strlen(out)-1);
+                size_t need2 = strlen(evaled);
+                if (out_len + need2 + 1 > out_cap) { out_cap = out_len + need2 + 1; char *nb = realloc(out, out_cap); if (!nb) { free(out); free(tmpl); free(evaled); errorf("out of memory in peric"); } out = nb; }
+                memcpy(out + out_len, evaled, need2); out_len += need2; out[out_len] = '\0';
                 free(evaled);
                 cur = cbr + 1;
             }
@@ -1256,17 +1292,49 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 free(cpy);
                 Function *fn = find_function(ftrim);
                 if (fn) {
-                    /* handle builtins when function is used as a statement */
+                    /* language-level function: delegate to compile-time call wrapper
+                       but allow known simple builtins to be no-ops when used as statements */
                     if (strcmp(ftrim, "my_strlen") == 0 || strcmp(ftrim, "my_strcmp") == 0) {
                         /* ignore return; builtins operate on symbols */
-                        if (strcmp(ftrim, "my_strlen") == 0 && argcnt >= 1) {
-                            /* do nothing (user may call as statement) */
-                        }
+                        /* nothing to do when called as a statement */
                     } else {
                         call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, NULL, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
                     }
+                } else if (strcmp(ftrim, "sammy") == 0 || strcmp(ftrim, "rogers") == 0 || strcmp(ftrim, "john") == 0 || strcmp(ftrim, "paul") == 0) {
+                    /* handle a small set of host helpers when called as statements */
+                    if (strcmp(ftrim, "sammy") == 0) {
+                        int fd = -1; char *path = NULL; int flags = 0; mode_t mode = 0;
+                        if (argcnt >= 1 && argnames[0]) { Sym *s = sym_get(argnames[0]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR) path = r->sval; } }
+                        if (argcnt >= 2) { if (argnames[1]) { Sym *s = sym_get(argnames[1]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR && r->sval) { if (strcmp(r->sval, "r") == 0) flags = O_RDONLY; else if (strcmp(r->sval, "w") == 0) flags = O_WRONLY | O_CREAT | O_TRUNC; else if (strcmp(r->sval, "a") == 0) flags = O_WRONLY | O_CREAT | O_APPEND; else if (strcmp(r->sval, "r+") == 0) flags = O_RDWR; else flags = O_RDONLY; } } } else { flags = (int)argvals[1]; } }
+                        if (argcnt >= 3) mode = (mode_t)argvals[2];
+                        if (path) { fd = open(path, flags, mode); if (fd >= 0) close(fd); }
+                    } else if (strcmp(ftrim, "rogers") == 0) {
+                        if (argcnt >= 1) {
+                            int fd = -1; if (argnames[0]) { Sym *s = sym_get(argnames[0]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_INT) fd = (int)r->ival; } } else fd = (int)argvals[0]; if (fd >= 0) close(fd);
+                        }
+                    } else if (strcmp(ftrim, "john") == 0) {
+                        /* john(fd, bufname [, count]) as a statement: perform read and store into bufname if provided */
+                        ssize_t nread = -1; int fd = -1; char *dstname = NULL;
+                        if (argcnt >= 1) { if (argnames[0]) { Sym *s = sym_get(argnames[0]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_INT) fd = (int)r->ival; } } else fd = (int)argvals[0]; }
+                        if (argcnt >= 2 && argnames[1]) dstname = argnames[1];
+                        if (fd >= 0 && dstname) {
+                            if (argcnt >= 3) {
+                                size_t cnt = (size_t)argvals[2]; char *buf = malloc(cnt + 1); if (buf) { nread = read(fd, buf, cnt); if (nread > 0) { buf[nread] = '\0'; sym_set_str(dstname, buf); } free(buf); }
                             } else {
-                                errorf("Call to undefined function '%s' at statement '%s'", ftrim, r);
+                                size_t cap = 4096; size_t pos = 0; char *buf = malloc(cap+1); if (buf) { while (1) { ssize_t r = read(fd, buf + pos, cap - pos); if (r > 0) { pos += r; if (cap - pos < 1024) { cap *= 2; char *nb = realloc(buf, cap+1); if (!nb) break; buf = nb; } } else if (r == 0) break; else break; } nread = (ssize_t)pos; buf[pos] = '\0'; sym_set_str(dstname, buf); free(buf); }
+                            }
+                        }
+                    } else if (strcmp(ftrim, "paul") == 0) {
+                        /* paul(line_sym, n_sym, stream_or_fd) as statement: perform getline and store into symbols if provided */
+                        ssize_t rv = -1; char *line = NULL; size_t linelen = 0; FILE *fp = NULL;
+                        if (argcnt >= 3) {
+                            if (argnames[2]) { Sym *s = sym_get(argnames[2]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR && r->sval) fp = fopen(r->sval, "r"); } }
+                            if (!fp) { int fd = (int)argvals[2]; if (fd >= 0) fp = fdopen(fd, "r"); }
+                            if (fp) { rv = getline(&line, &linelen, fp); if (rv >= 0 && line) { if (argnames[0]) sym_set_str(argnames[0], line); if (argnames[1]) sym_set_int(argnames[1], (long long)linelen); free(line); } fclose(fp); }
+                        }
+                    }
+                } else {
+                    errorf("Call to undefined function '%s' at statement '%s'", ftrim, r);
                 }
                 for (int ii=0; ii<argcnt; ++ii) if (argnames[ii]) free(argnames[ii]);
             }
