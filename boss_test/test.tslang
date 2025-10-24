@@ -4,3 +4,4 @@ Deschodt Eric() -> int
     src = src + "Hello, World!"
     eric length = my_strlen(src)
     peric("Length of the string {src} is: {length}")
+    deschodt 0
