@@ -1209,7 +1209,32 @@ static Stmt *make_stmt_indent(StmtKind k, const char *rawline, int indent) {
     return s;
 }
 
+/* Basic syntax checks used during parsing: detect unclosed string literals and
+   unbalanced parentheses (ignoring parentheses inside string literals). This
+   produces a fatal error with the offending line to help the user fix syntax
+   mistakes early. */
+static void syntax_check_or_error(const char *line) {
+    if (!line) return;
+    int paren = 0;
+    int in_str = 0;
+    for (const char *c = line; *c; ++c) {
+        if (*c == '"') {
+            in_str = !in_str;
+            continue;
+        }
+        if (in_str) continue;
+        if (*c == '(') paren++;
+        else if (*c == ')') paren--;
+    }
+    if (in_str) errorf("Syntax error: unclosed string literal: %s", line);
+    if (paren != 0) errorf("Syntax error: unmatched parentheses: %s", line);
+}
+
 static void append_stmt(Stmt **head, Stmt *s) {
+    if (!s) return;
+    /* Run the top-level syntax checker on the raw line before accepting it. */
+    syntax_check_or_error(s->raw);
+
     if (!*head) { *head = s; return; }
     Stmt *p = *head; while (p->next) p = p->next; p->next = s;
 }
