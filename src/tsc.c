@@ -20,6 +20,12 @@ static char *my_strdup(const char *s) {
     return p;
 }
 
+/* temporary holder for string returns from functions executed at compile-time */
+static char *g_last_return_str = NULL;
+/* flag set when the last nested compile-time call produced a string return that was written
+    into the caller table (so the caller should not overwrite it with an integer). */
+static int g_last_return_was_str = 0;
+
 // Helper to write little-endian integers
 static void write_u64(FILE *f, unsigned long v) {
     for (int i = 0; i < 8; ++i) putc((v >> (i*8)) & 0xff, f);
@@ -320,7 +326,19 @@ static void sym_set_str(const char *name, const char *s) {
     p->type = SYM_STR; p->sval = my_strdup(s ? s : "");
 }
 static Sym *sym_get(const char *name) {
-    Sym *p = sym_table; while (p) { if (strcmp(p->name, name) == 0) return p; p = p->next; } return NULL;
+    Sym *p = sym_table;
+    int is_index = (strchr(name, '[') != NULL);
+    while (p) {
+        if (is_index) {
+            /* debug compare for indexed lookups */
+            if (strcmp(p->name, name) == 0) { printf("DEBUG: sym_get matched '%s' == '%s'\n", p->name, name); return p; }
+            else printf("DEBUG: sym_get compare '%s' != '%s'\n", p->name, name);
+        } else {
+            if (strcmp(p->name, name) == 0) return p;
+        }
+        p = p->next;
+    }
+    return NULL;
 }
 static void sym_clear(void) {
     Sym *p = sym_table; while (p) { Sym *n = p->next; free(p->name); if (p->type==SYM_STR && p->sval) free(p->sval); /* do not free alias_target here */ free(p); p = n; } sym_table = NULL;
@@ -332,6 +350,44 @@ static void sym_set_alias(const char *name, Sym *target) {
     Sym *p = sym_table; while (p) { if (strcmp(p->name, name) == 0) break; p = p->next; }
     if (!p) { p = malloc(sizeof(Sym)); p->name = my_strdup(name); p->next = sym_table; sym_table = p; }
     p->type = SYM_ALIAS; p->alias_target = target; p->sval = NULL; p->ival = 0;
+}
+
+/* Variants of sym_set_* that operate on an explicit table head and return the new head.
+   These avoid temporarily switching the global `sym_table` pointer when inserting
+   symbols into a different table (e.g. caller_table). */
+static Sym *sym_set_int_in_table(Sym *table, const char *name, long long v) {
+    Sym *p = table;
+    while (p) { if (strcmp(p->name, name) == 0) break; p = p->next; }
+    if (!p) { p = malloc(sizeof(Sym)); p->name = my_strdup(name); p->next = table; table = p; }
+    if (p->type == SYM_ALIAS && p->alias_target) {
+        Sym *t = p->alias_target;
+        t->type = SYM_INT; t->ival = v; return table;
+    }
+    if (p->type == SYM_STR) { if (p->sval) free(p->sval); p->sval = NULL; }
+    p->type = SYM_INT; p->ival = v;
+    return table;
+}
+static Sym *sym_set_str_in_table(Sym *table, const char *name, const char *s) {
+    Sym *p = table;
+    while (p) { if (strcmp(p->name, name) == 0) break; p = p->next; }
+    if (!p) { p = malloc(sizeof(Sym)); p->name = my_strdup(name); p->next = table; table = p; }
+    if (p->type == SYM_ALIAS && p->alias_target) {
+        Sym *t = p->alias_target;
+        char *dup = my_strdup(s ? s : "");
+        if (t->type == SYM_STR && t->sval) free(t->sval);
+        t->type = SYM_STR; t->sval = dup; return table;
+    }
+    if (p->type == SYM_STR && p->sval) free(p->sval);
+    p->type = SYM_STR; p->sval = my_strdup(s ? s : "");
+    return table;
+}
+static Sym *sym_set_alias_in_table(Sym *table, const char *name, Sym *target) {
+    if (!name) return table;
+    Sym *p = table;
+    while (p) { if (strcmp(p->name, name) == 0) break; p = p->next; }
+    if (!p) { p = malloc(sizeof(Sym)); p->name = my_strdup(name); p->next = table; table = p; }
+    p->type = SYM_ALIAS; p->alias_target = target; p->sval = NULL; p->ival = 0;
+    return table;
 }
 
 /* Resolve aliases: follow alias_target until a non-alias symbol is returned */
@@ -374,6 +430,17 @@ typedef struct { const char *s; int pos; } ExprState;
 static void skip_ws(ExprState *e) { while (e->s[e->pos] == ' ' || e->s[e->pos] == '\t') e->pos++; }
 static long long parse_expr(ExprState *e);
 static long long parse_rel(ExprState *e);
+static int match_kw(ExprState *e, const char *kw) {
+    int len = strlen(kw);
+    const char *s = e->s + e->pos;
+    if (strncmp(s, kw, len) != 0) return 0;
+    /* ensure keyword is not part of a longer identifier: next char must be non-alnum/underscore */
+    char next = s[len];
+    if (next == '\0' || next == ' ' || next == '\t' || next == ')' || next == '(' || next == ']' || next == '[' || next == ',' || next == '+' || next == '-' || next == '*' || next == '/' || next == '%' || next == '<' || next == '>' || next == '=' || next == '!' ) return 1;
+    return 0;
+}
+static long long parse_and(ExprState *e);
+static long long parse_or(ExprState *e);
 static long long parse_factor(ExprState *e) {
     skip_ws(e);
     const char *s = e->s + e->pos;
@@ -386,6 +453,26 @@ static long long parse_factor(ExprState *e) {
     }
     if ((s[0] >= '0' && s[0] <= '9') || (s[0] == '-' && s[1] >= '0' && s[1] <= '9')) {
         char *end; long long v = strtoll(s, &end, 10); e->pos += (end - s); return v;
+    }
+    /* character or quoted literal (support '\n','\t','\\','\0' and simple single char) */
+    if (s[0] == '\'' || s[0] == '"') {
+        char q = s[0];
+        int adv = 1;
+        int val = 0;
+        if (s[adv] == '\\') {
+            char esc = s[adv+1];
+            if (esc == 'n') val = '\n';
+            else if (esc == 't') val = '\t';
+            else if (esc == '0') val = '\0';
+            else val = esc;
+            adv += 2; /* consumed backslash and escape char */
+        } else if (s[adv]) {
+            val = (unsigned char)s[adv]; adv += 1;
+        }
+        /* find closing quote if present */
+        if (s[adv] == q) adv += 1; /* include closing quote */
+        e->pos += adv;
+        return (long long)val;
     }
     // identifier (allow dots for fields) or unary dereference
     int i = 0; while ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] == '_' ) || (s[i] >= '0' && s[i] <= '9') || (s[i]=='.')) i++;
@@ -444,9 +531,26 @@ static long long parse_factor(ExprState *e) {
             Sym *sym = sym_get(key);
             if (sym) {
                 Sym *res = sym_resolve(sym);
-                if (res && res->type == SYM_INT) {
-                    printf("DEBUG: parse_factor lookup '%s' -> %lld\n", key, res->ival);
-                    return res->ival;
+                if (res) {
+                    if (res->type == SYM_INT) {
+                        printf("DEBUG: parse_factor lookup '%s' -> %lld\n", key, res->ival);
+                        return res->ival;
+                    } else if (res->type == SYM_STR) {
+                        /* string element exists: treat non-empty string as true (1), empty as 0 */
+                        int truth = (res->sval && res->sval[0]) ? 1 : 0;
+                        printf("DEBUG: parse_factor lookup '%s' -> STR present (truth=%d)\n", key, truth);
+                        return truth;
+                    }
+                }
+            }
+            else {
+                /* debugging: dump a few symbols in current table when lookup fails */
+                printf("DEBUG: parse_factor lookup '%s' -> (not found) ; current table head: %p\n", key, (void*)sym_table);
+                int dd = 0;
+                for (Sym *pp = sym_table; pp && dd < 8; pp = pp->next, ++dd) {
+                    if (pp->type == SYM_INT) printf("  [tbl] %s -> INT %lld (addr=%p)\n", pp->name, pp->ival, (void*)&pp->ival);
+                    else if (pp->type == SYM_STR) printf("  [tbl] %s -> STR '%s' (sval=%p)\n", pp->name, pp->sval?pp->sval:"(null)", (void*)pp->sval);
+                    else if (pp->type == SYM_ALIAS) printf("  [tbl] %s -> ALIAS to %s\n", pp->name, pp->alias_target?pp->alias_target->name:"(null)");
                 }
             }
             /* Fallback: if 'name' resolves to a string, return the character code at index */
@@ -534,9 +638,43 @@ static long long parse_rel(ExprState *e) {
 
 }
 
+/* parse 'and' with higher precedence than 'or' */
+static long long parse_and(ExprState *e) {
+    long long left = parse_rel(e);
+    for (;;) {
+        skip_ws(e);
+        /* debug: show where we are when trying to match 'and' (temporary) */
+        printf("DEBUG_PARSE: parse_and pos=%d next='%.40s'\n", e->pos, e->s + e->pos);
+        if (match_kw(e, "and")) {
+            printf("DEBUG_PARSE: match 'and' at pos=%d next='%.20s'\n", e->pos, e->s + e->pos);
+            e->pos += 3; /* consume 'and' */
+            long long right = parse_rel(e);
+            left = (left && right) ? 1 : 0;
+        } else break;
+    }
+    return left;
+}
+
+/* parse 'or' (lowest precedence for logical ops) */
+static long long parse_or(ExprState *e) {
+    long long left = parse_and(e);
+    for (;;) {
+        skip_ws(e);
+        /* debug: show where we are when trying to match 'or' (temporary) */
+        printf("DEBUG_PARSE: parse_or pos=%d next='%.40s'\n", e->pos, e->s + e->pos);
+        if (match_kw(e, "or")) {
+            printf("DEBUG_PARSE: match 'or' at pos=%d next='%.20s'\n", e->pos, e->s + e->pos);
+            e->pos += 2; /* consume 'or' */
+            long long right = parse_and(e);
+            left = (left || right) ? 1 : 0;
+        } else break;
+    }
+    return left;
+}
+
 static long long eval_int_expr(const char *expr) {
     ExprState e = { expr, 0 };
-    return parse_rel(&e);
+    return parse_or(&e);
 }
 
 /* Evaluate a placeholder: if it's a plain identifier and maps to string, return string;
@@ -556,6 +694,20 @@ static char *eval_placeholder(const char *inside) {
             if (r->type == SYM_STR) return my_strdup(r->sval);
             else { char buf[64]; snprintf(buf, sizeof(buf), "%lld", r->ival); return my_strdup(buf); }
         }
+    }
+    /* Support indexed placeholders like tab[i] where the index is an expression.
+       We evaluate the index and attempt a direct lookup of the concrete symbol
+       (e.g. "tab[0]") and return the string if present. */
+    char *obr = strchr(tmp, '[');
+    char *cbr = obr ? strchr(obr, ']') : NULL;
+    if (obr && cbr) {
+        /* build base and index expression */
+        int baselen = obr - tmp;
+        char basename[256]; if (baselen >= (int)sizeof(basename)) baselen = sizeof(basename)-1; memcpy(basename, tmp, baselen); basename[baselen] = '\0'; char idxexpr[256]; int ilen = cbr - (obr + 1); if (ilen >= (int)sizeof(idxexpr)) ilen = sizeof(idxexpr)-1; memcpy(idxexpr, obr + 1, ilen); idxexpr[ilen] = '\0'; trim(basename); trim(idxexpr);
+        long long idxval = eval_int_expr(idxexpr);
+        char key[512]; snprintf(key, sizeof(key), "%s[%lld]", basename, idxval);
+        Sym *s2 = sym_get(key);
+        if (s2) { Sym *r2 = sym_resolve(s2); if (r2->type == SYM_STR) return my_strdup(r2->sval ? r2->sval : ""); else { char buf2[64]; snprintf(buf2, sizeof(buf2), "%lld", r2->ival); return my_strdup(buf2); } }
     }
     // else evaluate as int expression
     long long v = eval_int_expr(tmp);
@@ -582,6 +734,35 @@ static char *unescape_peric(const char *s) {
             out[oi++] = s[i];
         }
         if (oi >= max - 1) break;
+    }
+    out[oi] = '\0';
+    return out;
+}
+
+/* Unescape C-like string literal sequences for stored string literals.
+   \n -> newline, \t -> tab, \\ -> backslash, \" -> ", \' -> ', \0 -> NUL, \r -> CR, \b -> backspace
+   Returns a newly malloc()'d string (caller must free). */
+static char *unescape_cstring(const char *s) {
+    if (!s) return NULL;
+    int len = strlen(s);
+    char *out = malloc(len + 1);
+    if (!out) return NULL;
+    int oi = 0;
+    for (int i = 0; i < len; ++i) {
+        if (s[i] == '\\' && i + 1 < len) {
+            char c = s[i+1];
+            if (c == 'n') { out[oi++] = '\n'; i++; }
+            else if (c == 't') { out[oi++] = '\t'; i++; }
+            else if (c == '\\') { out[oi++] = '\\'; i++; }
+            else if (c == 'r') { out[oi++] = '\r'; i++; }
+            else if (c == '0') { out[oi++] = '\0'; i++; }
+            else if (c == 'b') { out[oi++] = '\b'; i++; }
+            else if (c == '\"') { out[oi++] = '\"'; i++; }
+            else if (c == '\'') { out[oi++] = '\''; i++; }
+            else { /* unknown escape: keep the char as-is */ out[oi++] = c; i++; }
+        } else {
+            out[oi++] = s[i];
+        }
     }
     out[oi] = '\0';
     return out;
@@ -618,7 +799,20 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
                 if (rhs[0] == '"' || rhs[0] == '\'') {
                     char q = rhs[0];
-                    const char *q2 = strchr(rhs+1, q); if (!q2) q2 = rhs+1; size_t llen = q2 - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
+                    /* find closing quote, respect backslash-escaped quotes */
+                    const char *q2 = rhs + 1;
+                    while (*q2) {
+                        if (*q2 == '\\' && *(q2+1)) q2 += 2;
+                        else if (*q2 == q) break;
+                        else q2++;
+                    }
+                    if (!*q2) q2 = rhs + 1; /* fallback */
+                    size_t llen = q2 - (rhs+1);
+                    char *raw = malloc(llen+1); memcpy(raw, rhs+1, llen); raw[llen] = '\0';
+                    char *val = unescape_cstring(raw);
+                    free(raw);
+                    sym_set_str(name, val ? val : "");
+                    if (val) free(val);
                 } else {
                     /* detect function call like fname(arg1, arg2) */
                     const char *op = strchr(rhs, '(');
@@ -637,11 +831,19 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                                     byref[argcnt] = 1;
                                                     argvals[argcnt] = 0;
                                                 } else if (t[0] == '"' || t[0] == '\'') {
-                                                    /* literal string/char argument: create temporary literal symbol and pass its name */
-                                                    char *tmpname = create_literal_string(t);
-                                                    argnames[argcnt] = tmpname;
-                                                    byref[argcnt] = 0;
-                                                    argvals[argcnt] = 0;
+                                                    /* literal string or char argument */
+                                                    if (t[0] == '\'' && t[1] && t[2] == '\'' && t[3] == '\0') {
+                                                        /* single-quoted single char literal: pass as integer value */
+                                                        argnames[argcnt] = NULL;
+                                                        argvals[argcnt] = (int)t[1];
+                                                        byref[argcnt] = 0;
+                                                    } else {
+                                                        /* create temporary literal symbol and pass its name */
+                                                        char *tmpname = create_literal_string(t);
+                                                        argnames[argcnt] = tmpname;
+                                                        byref[argcnt] = 0;
+                                                        argvals[argcnt] = 0;
+                                                    }
                                                 } else {
                                                     /* if the token is a plain identifier (starts with letter or _), record its name so callee can alias arrays */
                                                     int is_id = 1;
@@ -684,7 +886,9 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                     sym_set_int(name, cres);
                                 } else {
                                     long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, name, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
-                                    sym_set_int(name, cres);
+                                    /* If the callee produced a string return assigned into 'name', avoid
+                                        overwriting it with the integer return value. */
+                                    if (!g_last_return_was_str) sym_set_int(name, cres);
                                 }
                             } else {
                                 errorf("Call to undefined function '%s' in assignment to '%s'", ftrim, name);
@@ -692,10 +896,12 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                             for (int ii=0; ii<argcnt; ++ii) if (argnames[ii]) free(argnames[ii]);
                         } else {
                             long long v = eval_int_expr(rhs);
+                            printf("DEBUG: ASSIGN expr -> setting '%s' = %lld\n", name, v);
                             sym_set_int(name, v);
                         }
                     } else {
                         long long v = eval_int_expr(rhs);
+                        printf("DEBUG: ASSIGN expr -> setting '%s' = %lld\n", name, v);
                         sym_set_int(name, v);
                     }
                 }
@@ -736,30 +942,55 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 /* detect if LHS is a dereference like '*name' (first non-space is '*') */
                 int deref_flag = 0; for (int _i=0; raw_lhs[_i]; ++_i) { if (raw_lhs[_i] == ' ' || raw_lhs[_i] == '\t') continue; if (raw_lhs[_i] == '*') deref_flag = 1; break; }
                 char name[256]; extract_ident_from_lhs(raw_lhs, name, sizeof(name));
-                /* require prior declaration via 'eric' (ST_ERIC_DECL) before assigning to a variable */
-                Sym *lhs_sym = sym_get(name);
+                /* support indexed LHS like tab[i] by resolving the index now and building a concrete symbol name */
+                char base_name[256]; char use_name[256]; memset(base_name,0,sizeof(base_name)); memset(use_name,0,sizeof(use_name));
+                char *br = strchr(raw_lhs, '[');
+                if (br) {
+                    /* extract base up to '[' */
+                    int blen = br - raw_lhs; if (blen >= (int)sizeof(base_name)) blen = sizeof(base_name)-1; memcpy(base_name, raw_lhs, blen); base_name[blen] = '\0'; trim(base_name);
+                    /* extract index expression between [ and ] */
+                    const char *idxstart = br + 1; const char *idxend = strchr(idxstart, ']'); char idxexpr[128]; if (idxend) { int ilen = idxend - idxstart; if (ilen >= (int)sizeof(idxexpr)) ilen = sizeof(idxexpr)-1; memcpy(idxexpr, idxstart, ilen); idxexpr[ilen] = '\0'; } else { idxexpr[0] = '\0'; }
+                    int idxval = 0; if (idxexpr[0]) { idxval = (int)eval_int_expr(idxexpr); }
+                    snprintf(use_name, sizeof(use_name), "%s[%d]", base_name, idxval);
+                } else {
+                    strncpy(base_name, name, sizeof(base_name)-1); base_name[sizeof(base_name)-1] = '\0'; strncpy(use_name, name, sizeof(use_name)-1); use_name[sizeof(use_name)-1] = '\0';
+                }
+                printf("DEBUG: ASSIGN detected raw_lhs='%s' -> base='%s' use_name='%s'\n", raw_lhs, base_name, use_name);
+                /* require prior declaration via 'eric' (ST_ERIC_DECL) for the base name before assigning to a variable */
+                Sym *lhs_sym = sym_get(base_name);
                 if (!lhs_sym) {
                     /* allow assignment to dotted fields when the base was declared */
-                    if (strchr(name, '.')) {
-                        char base[256]; size_t pos = 0; while (pos < sizeof(base)-1 && name[pos] && name[pos] != '.') { base[pos] = name[pos]; pos++; } base[pos] = '\0';
+                    if (strchr(base_name, '.')) {
+                        char base[256]; size_t pos = 0; while (pos < sizeof(base)-1 && base_name[pos] && base_name[pos] != '.') { base[pos] = base_name[pos]; pos++; } base[pos] = '\0';
                         if (!sym_has_field_prefix(base)) {
-                            errorf("Assignment to undeclared variable '%s' (declare using 'eric <name> -> type')", name);
+                            errorf("Assignment to undeclared variable '%s' (declare using 'eric <name> -> type')", base_name);
                         }
                     } else {
-                        errorf("Assignment to undeclared variable '%s' (declare using 'eric <name> -> type')", name);
+                        errorf("Assignment to undeclared variable '%s' (declare using 'eric <name> -> type')", base_name);
                     }
                 }
                 const char *rhs = eq+1; while (*rhs==' '||*rhs=='\t') rhs++;
-                /* If RHS contains a '+' outside quotes, evaluate as string concatenation (preserve strings) */
+                /* If RHS contains a '+' outside quotes, it might be string concatenation.
+                   But '+' is also a valid arithmetic operator. Only treat as string
+                   concatenation when the RHS contains quoted strings or the LHS
+                   variable is known to be a string. This avoids treating expressions
+                   like 'end - start + 1' as string concat producing '281'. */
                 int plus_found_local = 0; const char *ppp = rhs; while (*ppp) {
                     if (*ppp == '"' || *ppp == '\'') { char q = *ppp; ppp++; while (*ppp && *ppp != q) ppp++; if (*ppp) ppp++; }
                     else { if (*ppp == '+') { plus_found_local = 1; break; } ppp++; }
                 }
                 if (plus_found_local) {
-                    char *cres = eval_concat_string(rhs);
-                    if (cres) { sym_set_str(name, cres); free(cres); }
-                    /* done with assignment */
-                    goto ASSIGN_DONE_LABEL;
+                    int must_concat = 0;
+                    /* If RHS contains explicit quoted strings, it's clearly concatenation */
+                    if (strchr(rhs, '"') || strchr(rhs, '\'')) must_concat = 1;
+                    /* Otherwise if the LHS symbol exists and is a string, prefer concatenation */
+                    else if (lhs_sym) { Sym *lsr = sym_resolve(lhs_sym); if (lsr && lsr->type == SYM_STR) must_concat = 1; }
+                    if (must_concat) {
+                        char *cres = eval_concat_string(rhs);
+                        if (cres) { sym_set_str(use_name, cres); free(cres); }
+                        /* done with assignment */
+                        goto ASSIGN_DONE_LABEL;
+                    }
                 }
 
                 /* Detect augmented assignment operator token robustly */
@@ -777,51 +1008,53 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                 if (aug_op_token) {
                     printf("DEBUG: AUG_ASSIGN detected name='%s' op='%c' raw_lhs='%s' rhs='%s'\n", name, aug_op_token, raw_lhs, rhs);
                     /* perform augmented op based on LHS type */
-                    Sym *ls = sym_get(name);
+                    Sym *ls = sym_get(base_name);
                     Sym *lr = ls ? sym_resolve(ls) : NULL;
             if (aug_op_token == '+') {
                 /* string concat if LHS is string or RHS is quoted or RHS contains quotes */
-                if ((lr && lr->type == SYM_STR) || strchr(rhs, '"') || strchr(rhs, '\'')) {
+                            if ((lr && lr->type == SYM_STR) || strchr(rhs, '"') || strchr(rhs, '\'')) {
                             char *rhsstr = eval_concat_string(rhs);
                             const char *left = (lr && lr->type == SYM_STR && lr->sval) ? lr->sval : "";
                             size_t nl = strlen(left) + (rhsstr ? strlen(rhsstr) : 0);
                             char *nstr = malloc(nl + 1);
                             if (nstr) {
                                 nstr[0] = '\0'; strcat(nstr, left); if (rhsstr) strcat(nstr, rhsstr);
-                                sym_set_str(name, nstr);
+                                sym_set_str(use_name, nstr);
                                 free(nstr);
                             }
                             if (rhsstr) free(rhsstr);
-                            Sym *nn = sym_get(name); if (nn) { Sym *nr = sym_resolve(nn); if (nr && nr->type==SYM_STR) printf("DEBUG: AUG_ASSIGN result '%s'\n", nr->sval?nr->sval:"(null)"); }
+                            Sym *nn = sym_get(use_name); if (nn) { Sym *nr = sym_resolve(nn); if (nr && nr->type==SYM_STR) printf("DEBUG: AUG_ASSIGN result '%s'\n", nr->sval?nr->sval:"(null)"); }
                         } else {
                             long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
                             long long add = eval_int_expr(rhs);
-                            sym_set_int(name, cur + add);
-                            Sym *nn = sym_get(name); if (nn) { Sym *nr = sym_resolve(nn); if (nr && nr->type==SYM_INT) printf("DEBUG: AUG_ASSIGN result %lld\n", nr->ival); }
+                            sym_set_int(use_name, cur + add);
+                            Sym *nn = sym_get(use_name); if (nn) { Sym *nr = sym_resolve(nn); if (nr && nr->type==SYM_INT) printf("DEBUG: AUG_ASSIGN result %lld\n", nr->ival); }
                         }
                     } else if (aug_op_token == '-') {
                         long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
                         long long sub = eval_int_expr(rhs);
-                        sym_set_int(name, cur - sub);
+                        sym_set_int(use_name, cur - sub);
                     } else if (aug_op_token == '*') {
                         long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
                         long long mul = eval_int_expr(rhs);
-                        sym_set_int(name, cur * mul);
+                        sym_set_int(use_name, cur * mul);
                     } else if (aug_op_token == '/') {
                         long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
                         long long dv = eval_int_expr(rhs);
-                        if (dv != 0) sym_set_int(name, cur / dv);
+                        if (dv != 0) sym_set_int(use_name, cur / dv);
                         else errorf("Division by zero in augmented assignment on '%s'", name);
                     } else if (aug_op_token == '%') {
                         long long cur = 0; if (lr && lr->type == SYM_INT) cur = lr->ival;
                         long long dv = eval_int_expr(rhs);
-                        if (dv != 0) sym_set_int(name, cur % dv);
+                        if (dv != 0) sym_set_int(use_name, cur % dv);
                         else errorf("Modulo by zero in augmented assignment on '%s'", name);
                     }
                     goto ASSIGN_DONE_LABEL;
                 }
                 if (rhs[0] == '"' || rhs[0] == '\'') {
-                    char q = rhs[0]; const char *q2 = strchr(rhs+1, q); if (!q2) q2 = rhs+1; size_t llen = q2 - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0'; sym_set_str(name, val); free(val);
+                    char q = rhs[0]; const char *q2 = strchr(rhs+1, q); if (!q2) q2 = rhs+1; size_t llen = q2 - (rhs+1); char *val = malloc(llen+1); memcpy(val, rhs+1, llen); val[llen]='\0';
+                    printf("DEBUG: ASSIGN string literal -> setting '%s' = '%s'\n", use_name, val);
+                    sym_set_str(use_name, val); free(val);
                 } else {
                     /* detect function call like fname(arg1, arg2) */
                     const char *op = strchr(rhs, '(');
@@ -855,30 +1088,36 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                                 if (strcmp(ftrim, "my_strlen") == 0 && argcnt >= 1) {
                                     long long cres = 0;
                                     if (argnames[0]) { Sym *s = sym_get(argnames[0]); if (s) { Sym *r = sym_resolve(s); if (r && r->type == SYM_STR && r->sval) cres = (long long)strlen(r->sval); } }
-                                    sym_set_int(name, cres);
+                                    sym_set_int(use_name, cres);
                                 } else if (strcmp(ftrim, "my_strcmp") == 0 && argcnt >= 2) {
                                     long long cres = 0;
                                     char *s1 = NULL; char *s2 = NULL;
                                     if (argnames[0]) { Sym *a = sym_get(argnames[0]); if (a) { Sym *ra = sym_resolve(a); if (ra && ra->type==SYM_STR) s1 = ra->sval; } }
                                     if (argnames[1]) { Sym *b = sym_get(argnames[1]); if (b) { Sym *rb = sym_resolve(b); if (rb && rb->type==SYM_STR) s2 = rb->sval; } }
                                     if (s1 && s2) cres = (long long)strcmp(s1, s2);
-                                    sym_set_int(name, cres);
+                                    printf("DEBUG: ASSIGN builtin my_strcmp -> setting '%s' = %lld\n", use_name, cres);
+                                    sym_set_int(use_name, cres);
                                 } else {
-                                    long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, name, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
-                                    sym_set_int(name, cres);
+                                                long long cres = call_function_compiletime_with_refs(fn, argvals, argnames, byref, argcnt, use_name, msgs_p, msg_lens_p, n_msgs_p, max_msgs_p);
+                                                /* If the nested call produced a string return and assigned it into the
+                                                    current table (g_last_return_was_str==1), don't overwrite it with an int. */
+                                                if (!g_last_return_was_str) sym_set_int(use_name, cres);
                                 }
                             } else {
                                 long long v = eval_int_expr(rhs);
-                                sym_set_int(name, v);
+                                printf("DEBUG: ASSIGN expr -> setting '%s' = %lld\n", use_name, v);
+                                sym_set_int(use_name, v);
                             }
                             for (int ii=0; ii<argcnt; ++ii) if (argnames[ii]) free(argnames[ii]);
                         } else {
                             long long v = eval_int_expr(rhs);
-                            sym_set_int(name, v);
+                            printf("DEBUG: ASSIGN expr -> setting '%s' = %lld\n", use_name, v);
+                            sym_set_int(use_name, v);
                         }
                     } else {
                         long long v = eval_int_expr(rhs);
-                        sym_set_int(name, v);
+                        printf("DEBUG: ASSIGN expr -> setting '%s' = %lld\n", use_name, v);
+                        sym_set_int(use_name, v);
                     }
                 }
                 /* handle deref assignment (if original LHS used *name) */
@@ -961,11 +1200,28 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
             free(tmpl);
         } else if (s->kind == ST_RETURN) {
             const char *p = s->raw + strlen("deschodt"); while (*p==' '||*p=='\t') p++;
-            if (*p) {
-                /* evaluate the return expression (may be an expression or identifiers) */
-                long long rv = eval_int_expr(p);
+            /* capture string return if expression refers to a string variable or literal
+               We try to detect string returns first so we don't call eval_int_expr on
+               an identifier that holds a string (which would trigger an "Undefined
+               variable" error from the integer evaluator). */
+            const char *q = s->raw + strlen("deschodt"); while (*q==' '||*q=='\t') q++;
+            /* free previous if any */
+            if (g_last_return_str) { free(g_last_return_str); g_last_return_str = NULL; }
+            int handled_as_string = 0;
+            if (*q == '\'' || *q == '"') {
+                char quote = *q; const char *q2 = strchr(q+1, quote); if (!q2) q2 = q+1; size_t llen = q2 - (q+1); g_last_return_str = malloc(llen+1); if (g_last_return_str) { memcpy(g_last_return_str, q+1, llen); g_last_return_str[llen] = '\0'; }
+                handled_as_string = 1;
+            } else {
+                /* try simple identifier lookup for string variable */
+                char idtmp[256] = {0}; const char *r = q; while (*r && !(((*r>='a'&&*r<='z')||(*r>='A'&&*r<='Z')||(*r=='_')))) r++; int ii=0; while (*r && (((*r>='a'&&*r<='z')||(*r>='A'&&*r<='Z')||(*r>='0'&&*r<='9')||(*r=='_')) ) && ii < (int)sizeof(idtmp)-1) { idtmp[ii++] = *r++; } idtmp[ii] = '\0'; if (idtmp[0]) { Sym *sx = sym_find_in_table(sym_table, idtmp); if (sx) { Sym *sr = sym_resolve(sx); if (sr && sr->type == SYM_STR && sr->sval) { g_last_return_str = my_strdup(sr->sval); handled_as_string = 1; } } }
+            }
+            /* If not handled as a string, evaluate as integer expression (if any) */
+            if (!handled_as_string && *q) {
+                long long rv = eval_int_expr(q);
                 *retcode_p = (int)rv;
             }
+            /* set the global flag indicating whether this return produced a string */
+            g_last_return_was_str = handled_as_string;
             printf("DEBUG: ST_RETURN encountered raw='%s' ret=%d\n", s->raw, *retcode_p);
             return 1;
         }
@@ -983,7 +1239,11 @@ static int exec_stmt_list(Stmt *stlist, char ***msgs_p, unsigned int **msg_lens_
                             while (tok && argcnt < 8) {
                                 char *t = trim(tok);
                                 if (t[0] == '&') { char *n = trim(t+1); argnames[argcnt] = my_strdup(n); byref[argcnt] = 1; argvals[argcnt]=0; }
-                                else if (t[0] == '"' || t[0] == '\'') { argnames[argcnt] = create_literal_string(t); byref[argcnt]=0; argvals[argcnt]=0; }
+                                else if (t[0] == '"' || t[0] == '\'') {
+                                    if (t[0] == '\'' && t[1] && t[2] == '\'' && t[3] == '\0') {
+                                        argnames[argcnt] = NULL; argvals[argcnt] = (int)t[1]; byref[argcnt] = 0;
+                                    } else { argnames[argcnt] = create_literal_string(t); byref[argcnt]=0; argvals[argcnt]=0; }
+                                }
                                 else {
                                     int is_id = 1;
                                     if (!((t[0] >= 'a' && t[0] <= 'z') || (t[0] >= 'A' && t[0] <= 'Z') || t[0] == '_')) is_id = 0;
@@ -1120,7 +1380,10 @@ static char *create_literal_string(const char *lit) {
     memcpy(buf, start, len);
     buf[len] = '\0';
     char name[64]; snprintf(name, sizeof(name), "__litstr_%d", g_litstr_counter++);
-    sym_set_str(name, buf);
+    /* unescape escape sequences inside the literal before storing */
+    char *un = unescape_cstring(buf);
+    if (un) { sym_set_str(name, un); free(un); }
+    else { sym_set_str(name, buf); }
     free(buf);
     return my_strdup(name);
 }
@@ -1166,7 +1429,30 @@ static char *eval_concat_string(const char *expr) {
                     parts[np++] = my_strdup(numbuf);
                 }
             } else {
-                /* not a known symbol: try integer expression and convert */
+                /* not a known symbol: special-case indexed string access like name[idx]
+                   so that concatenating a character (e.g. src[i]) appends the actual
+                   character instead of its decimal representation. */
+                char *brack = strchr(ttrim, '[');
+                if (brack) {
+                    /* extract base name and index expression */
+                    int baselen = brack - ttrim;
+                    char basename[256]; if (baselen >= (int)sizeof(basename)) baselen = sizeof(basename)-1; memcpy(basename, ttrim, baselen); basename[baselen] = '\0'; char *btrim = trim(basename);
+                    const char *idxstart = brack + 1; const char *idxend = strchr(idxstart, ']'); char idxexpr[256]; if (idxend) { int ilen = idxend - idxstart; if (ilen >= (int)sizeof(idxexpr)) ilen = sizeof(idxexpr)-1; memcpy(idxexpr, idxstart, ilen); idxexpr[ilen] = '\0'; } else { idxexpr[0] = '\0'; }
+                    Sym *basesym = sym_get(btrim);
+                    if (basesym) {
+                        Sym *bres = sym_resolve(basesym);
+                        if (bres && bres->type == SYM_STR && bres->sval) {
+                            int idxval = 0; if (idxexpr[0]) idxval = (int)eval_int_expr(idxexpr);
+                            size_t sl = strlen(bres->sval);
+                            char one[2] = {'\0','\0'};
+                            if (idxval >= 0 && (size_t)idxval < sl) { one[0] = bres->sval[idxval]; }
+                            parts[np++] = my_strdup(one);
+                            free(tok);
+                            continue;
+                        }
+                    }
+                }
+                /* fallback: try integer expression and convert to decimal string */
                 long long v = eval_int_expr(ttrim);
                 char numbuf[64]; snprintf(numbuf, sizeof(numbuf), "%lld", v);
                 parts[np++] = my_strdup(numbuf);
@@ -1713,14 +1999,7 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
     // Save caller table and create fresh sym_table for callee
     Sym *saved = sym_table;
     Sym *caller_table = saved; // keep pointer to locate targets
-    int use_caller_table = (assign_lhs != NULL);
-    if (use_caller_table) {
-        /* execute callee in caller's symbol table so callee-created symbols
-           are directly visible to caller (implements `lhs = fn(...)` auto-aliasing) */
-        sym_table = caller_table;
-    } else {
-        sym_table = NULL; // new callee table
-    }
+    sym_table = NULL; // new callee table
     // bind parameters
     if (fn->params) {
         const char *p = fn->params;
@@ -1750,13 +2029,14 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
                         /* create matching callee symbol name: if param is array, create param[index], else alias param name */
                         if (param_is_array) {
                             char callee_key[256]; snprintf(callee_key, sizeof(callee_key), "%s[%s]", ntrim, idxpart);
+                            /* create alias in callee table (current sym_table) */
                             sym_set_alias(callee_key, t2);
-                            /* also add alias into caller_table so caller can reference param.field names */
-                            Sym *saved_sym = sym_table; sym_table = caller_table; sym_set_alias(callee_key, t2); sym_table = saved_sym;
+                            /* also add alias into caller_table */
+                            caller_table = sym_set_alias_in_table(caller_table, callee_key, t2);
                             printf("DEBUG: alias created %s -> %s\n", callee_key, caller_key);
                         } else {
                             sym_set_alias(ntrim, t2);
-                            Sym *saved_sym = sym_table; sym_table = caller_table; sym_set_alias(ntrim, t2); sym_table = saved_sym;
+                            caller_table = sym_set_alias_in_table(caller_table, ntrim, t2);
                             printf("DEBUG: alias created %s -> %s\n", ntrim, caller_key);
                         }
                         idx++; tok = strtok(NULL, ",");
@@ -1767,20 +2047,20 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
                 if (param_is_array) {
                     char base[128]; strncpy(base, arg_names[idx], sizeof(base)-1); base[sizeof(base)-1] = '\0'; char *br = strchr(base, '['); if (br) *br='\0';
                     int found_any = 0;
-                    for (int k = 0; k < 1024; ++k) {
+                        for (int k = 0; k < 1024; ++k) {
                         char caller_key[256]; snprintf(caller_key, sizeof(caller_key), "%s[%d]", base, k);
                         Sym *t2 = sym_find_in_table(caller_table, caller_key);
                         if (!t2) break;
                         char callee_key[256]; snprintf(callee_key, sizeof(callee_key), "%s[%d]", ntrim, k);
                         sym_set_alias(callee_key, t2);
-                        Sym *saved_sym = sym_table; sym_table = caller_table; sym_set_alias(callee_key, t2); sym_table = saved_sym;
+                        caller_table = sym_set_alias_in_table(caller_table, callee_key, t2);
                         printf("DEBUG: alias created %s -> %s\n", callee_key, caller_key);
                         found_any = 1;
                     }
                     if (found_any) { idx++; tok = strtok(NULL, ","); continue; }
                     /* fallback to aliasing base[0] if present */
                     char elem0[256]; snprintf(elem0, sizeof(elem0), "%s[0]", arg_names[idx]); Sym *t0 = sym_find_in_table(caller_table, elem0);
-                    if (t0) { sym_set_alias(ntrim, t0); Sym *saved_sym = sym_table; sym_table = caller_table; sym_set_alias(ntrim, t0); sym_table = saved_sym; printf("DEBUG: alias created %s -> %s\n", ntrim, elem0); idx++; tok = strtok(NULL, ","); continue; }
+                    if (t0) { sym_set_alias(ntrim, t0); caller_table = sym_set_alias_in_table(caller_table, ntrim, t0); printf("DEBUG: alias created %s -> %s\n", ntrim, elem0); idx++; tok = strtok(NULL, ","); continue; }
                 }
                 /* try struct-field mapping: if caller_table has entries like 'name.field', create callee.alias 'param.field' -> caller.name.field */
                 {
@@ -1791,7 +2071,7 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
                             const char *field = pp->name + base_len + 1;
                             char callee_field[256]; snprintf(callee_field, sizeof(callee_field), "%s.%s", ntrim, field);
                             sym_set_alias(callee_field, pp);
-                            Sym *saved_sym = sym_table; sym_table = caller_table; sym_set_alias(callee_field, pp); sym_table = saved_sym;
+                            caller_table = sym_set_alias_in_table(caller_table, callee_field, pp);
                             printf("DEBUG: alias created %s -> %s\n", callee_field, pp->name);
                             mapped_any = 1;
                         }
@@ -1803,11 +2083,53 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
                 if (target) { sym_set_alias(ntrim, target); idx++; tok = strtok(NULL, ","); continue; }
             }
 
-            /* default: bind by value */
+            /* fallback: bind by value */
             sym_set_int(ntrim, arg_vals ? arg_vals[idx] : 0);
             idx++; tok = strtok(NULL, ",");
         }
         free(cpy);
+    }
+    int local_max = 4; char **local_msgs = malloc(sizeof(char*) * local_max); unsigned int *local_lens = malloc(sizeof(unsigned int) * local_max); int local_n = 0; int retcode = 0;
+    // set globals so nested calls inside callee append into local_msgs
+    char ***old_msgs_p = g_msgs_p; unsigned int **old_msg_lens_p = g_msg_lens_p; int *old_n_msgs_p = g_n_msgs_p; int *old_max_msgs_p = g_max_msgs_p;
+    g_msgs_p = &local_msgs; g_msg_lens_p = &local_lens; g_n_msgs_p = &local_n; g_max_msgs_p = &local_max;
+    /* reset the nested-call string flag and clear any leftover string return before executing callee body */
+    if (g_last_return_str) { free(g_last_return_str); g_last_return_str = NULL; }
+    g_last_return_was_str = 0;
+    exec_stmt_list(fn->body, &local_msgs, &local_lens, &local_n, &local_max, &retcode);
+    // restore globals
+    g_msgs_p = old_msgs_p; g_msg_lens_p = old_msg_lens_p; g_n_msgs_p = old_n_msgs_p; g_max_msgs_p = old_max_msgs_p;
+    /* If callee produced a string return (g_last_return_str) and caller requested a target name,
+       write that string into the caller_table under assign_lhs. This supports patterns like
+       `tab[i] = extract(...)` where the extract() return should populate the caller element. */
+    /* Only treat a callee string-return as the function's return value if the
+       function's declared return type is a string/pointer (e.g. contains "char" or '*').
+       This avoids cases where a nested helper produced g_last_return_str but the
+       callee itself is meant to return an integer. */
+    int callee_declares_string_ret = 0;
+    if (fn && fn->ret_type) {
+        if (strstr(fn->ret_type, "char") || strchr(fn->ret_type, '*')) callee_declares_string_ret = 1;
+    }
+    if (g_last_return_str && assign_lhs && assign_lhs[0] && callee_declares_string_ret) {
+        printf("DEBUG: call returned string, assigning to '%s'\n", assign_lhs);
+        /* Insert string directly into caller_table without changing global sym_table. */
+        caller_table = sym_set_str_in_table(caller_table, assign_lhs, g_last_return_str);
+        /* debug: confirm the symbol was created in caller_table */
+        Sym *just = sym_find_in_table(caller_table, assign_lhs);
+        if (just) {
+            Sym *jr = sym_resolve(just);
+            if (jr->type == SYM_STR) printf("DEBUG: assigned caller symbol '%s' -> STR '%s'\n", assign_lhs, jr->sval ? jr->sval : "(null)");
+            else if (jr->type == SYM_INT) printf("DEBUG: assigned caller symbol '%s' -> INT %lld\n", assign_lhs, jr->ival);
+            else printf("DEBUG: assigned caller symbol '%s' -> ALIAS\n", assign_lhs);
+        } else {
+            printf("DEBUG: assigned caller symbol '%s' not found after sym_set_str_in_table\n", assign_lhs);
+        }
+        free(g_last_return_str); g_last_return_str = NULL;
+        g_last_return_was_str = 1;
+    } else {
+        /* clear any stray last-return string to avoid leaking into the caller */
+        if (g_last_return_str) { free(g_last_return_str); g_last_return_str = NULL; }
+        g_last_return_was_str = 0;
     }
     /* If caller requested to receive callee-created symbols with the given LHS name,
        copy matching callee symbols (exact name, or name[...] or name.field) into caller_table.
@@ -1816,7 +2138,10 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
     if (assign_lhs && assign_lhs[0]) {
         printf("DEBUG: callee_table symbols:\n");
         for (Sym *pp = sym_table; pp; pp = pp->next) {
-            printf("  %s (type=%d)\n", pp->name, pp->type);
+            if (pp->type == SYM_INT) printf("  %s (type=INT val=%lld)\n", pp->name, pp->ival);
+            else if (pp->type == SYM_STR) printf("  %s (type=STR sval='%s')\n", pp->name, pp->sval?pp->sval:"(null)");
+            else if (pp->type == SYM_ALIAS) printf("  %s (type=ALIAS -> %s)\n", pp->name, pp->alias_target?pp->alias_target->name:"(null)");
+            else printf("  %s (type=%d)\n", pp->name, pp->type);
         }
         size_t alen = strlen(assign_lhs);
         for (Sym *pp = sym_table; pp; pp = pp->next) {
@@ -1824,22 +2149,12 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
                 printf("DEBUG: copying callee symbol '%s' to caller_table for assign_lhs '%s'\n", pp->name, assign_lhs);
                 Sym *r = sym_resolve(pp);
                 if (r) {
-                    Sym *saved_sym = sym_table;
-                    sym_table = caller_table;
-                    if (r->type == SYM_INT) sym_set_int(pp->name, r->ival);
-                    else if (r->type == SYM_STR) sym_set_str(pp->name, r->sval ? r->sval : "");
-                    sym_table = saved_sym;
+                    if (r->type == SYM_INT) caller_table = sym_set_int_in_table(caller_table, pp->name, r->ival);
+                    else if (r->type == SYM_STR) caller_table = sym_set_str_in_table(caller_table, pp->name, r->sval ? r->sval : "");
                 }
             }
         }
     }
-    int local_max = 4; char **local_msgs = malloc(sizeof(char*) * local_max); unsigned int *local_lens = malloc(sizeof(unsigned int) * local_max); int local_n = 0; int retcode = 0;
-    // set globals so nested calls inside callee append into local_msgs
-    char ***old_msgs_p = g_msgs_p; unsigned int **old_msg_lens_p = g_msg_lens_p; int *old_n_msgs_p = g_n_msgs_p; int *old_max_msgs_p = g_max_msgs_p;
-    g_msgs_p = &local_msgs; g_msg_lens_p = &local_lens; g_n_msgs_p = &local_n; g_max_msgs_p = &local_max;
-    exec_stmt_list(fn->body, &local_msgs, &local_lens, &local_n, &local_max, &retcode);
-    // restore globals
-    g_msgs_p = old_msgs_p; g_msg_lens_p = old_msg_lens_p; g_n_msgs_p = old_n_msgs_p; g_max_msgs_p = old_max_msgs_p;
     /* copy back by-ref parameters from callee table into caller table to ensure updates are visible */
     if (fn->params) {
         const char *p = fn->params;
@@ -1868,9 +2183,9 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
                         Sym *r = sym_resolve(pp);
                         if (r) {
                             if (r->type == SYM_INT) {
-                                Sym *saved_sym = sym_table; sym_table = caller_table; sym_set_int(callee_field_name, r->ival); sym_table = saved_sym;
+                                caller_table = sym_set_int_in_table(caller_table, callee_field_name, r->ival);
                             } else if (r->type == SYM_STR) {
-                                Sym *saved_sym = sym_table; sym_table = caller_table; sym_set_str(callee_field_name, r->sval ? r->sval : ""); sym_table = saved_sym;
+                                caller_table = sym_set_str_in_table(caller_table, callee_field_name, r->sval ? r->sval : "");
                             }
                         }
                     }
@@ -1887,14 +2202,9 @@ static long long call_function_compiletime_with_refs(Function *fn, long long *ar
     }
     free(local_lens);
     free(local_msgs);
-    // clear callee sym_table and restore caller if we created a private callee table
-    if (!use_caller_table) {
-        sym_clear();
-        sym_table = caller_table;
-    } else {
-        /* we executed inside caller_table; leave caller_table intact and restore sym_table to saved */
-        sym_table = caller_table;
-    }
+    // clear callee sym_table and restore caller
+    sym_clear();
+    sym_table = caller_table;
     /* Ensure caller_table contains aliases for callee parameter fields like 'v.field' -> 'car.field' */
     if (fn->params) {
         const char *p2 = fn->params;

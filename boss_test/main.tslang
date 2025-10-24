@@ -1,0 +1,11 @@
+Deschodt Eric() -> int
+    eric str = "hello world ! i li\tke The Show"
+    eric tab -> char **
+    tab = my_str_to_word_array(str, ' ')
+    eric tab_size = 0
+    peric("{tab[0]}")
+    darius (tab[tab_size] != 0):
+        tab_size += 1
+    peric("Total words found: {tab_size}")
+    aer i in range(0, tab_size):
+        peric("{tab[i]} {i}")

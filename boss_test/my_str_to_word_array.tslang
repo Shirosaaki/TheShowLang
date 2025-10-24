@@ -1,0 +1,32 @@
+Deschodt lenget(end -> int, start -> int, str -> char *, c -> char) -> int
+    eric len = 0
+
+    erif (str[end + 1] == '\0' and (str[end] != c and str[end] != '\n' and str[end] != '\t')):
+        len = end - start + 1
+    deschelse
+        len = end - start
+    deschodt len
+
+Deschodt extract(src -> char *, start -> int, len -> int) -> char *
+    eric ret -> char *
+    ret = ""
+    aer i in range(start, start + len):
+        ret += src[i]
+    deschodt ret
+
+Deschodt my_str_to_word_array(str -> char *, c -> char) -> char **
+    eric tab -> char **
+    tab = []
+    eric end = 0
+    eric length = 0
+    eric start = 0
+    eric i = 0
+
+    darius (str[end] != '\0'):
+        erif (str[end] == '\n' or str[end] == c or str[end] == '\t' or str[end + 1] == '\0'):
+            length = lenget(end, start, str, c)
+            tab[i] = extract(str, start, length)
+            start = end + 1
+            i += 1
+        end += 1
+    deschodt tab
