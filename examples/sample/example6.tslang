@@ -1,5 +1,5 @@
 Deschodt Eric() -> int
-    eric nums -> int[5]
+    eric nums -> int[]
     nums[0] = 1
     nums[1] = 2
     nums[2] = 3
